@@ -1,3 +1,4 @@
+import { signalKeyFailureTracker, signingKeyFailure, venueSigningKeyUsed } from './trading/signal-key-failures';
 import { executeSignalBotEntry, pauseSignalBotIfFlat } from './trading/signal-bot-entry-admission';
 import { CLOSE_IN_PROGRESS } from './trading/signal-bot-close-intent-types';
 import { registerPartialCloseFanout } from './trading/signal-bot-close-intent-effects';
@@ -1291,7 +1292,7 @@ async function executePerpOrder(
   botCtx?: BotSubaccountContext | null,
   mainWalletOverride?: string,
   adapter = getDefaultAdapter(),
-): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number; actualFee?: number; admissionFeeQuote?: AvailableFeeRateQuote; submissionUnconfirmed?: boolean; executionMethod?: string; swiftOrderId?: string | null }> {
+): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number; actualFee?: number; admissionFeeQuote?: AvailableFeeRateQuote; submissionUnconfirmed?: boolean; executionMethod?: string; swiftOrderId?: string | null; keyFailureKind?: import('@shared/signal-key-failures').SignalKeyFailureKind; signingKeyUsed?: boolean }> {
   if (!reduceOnly) {
     const admission = await checkSignalBotLeverageAdmission({
       adapter,
@@ -1340,6 +1341,8 @@ async function executePerpOrder(
         : await placeMarketOrderWithFeeAuthority(adapter, orderParams);
     return {
       success: orderResult.success,
+      keyFailureKind: signingKeyFailure(orderResult),
+      signingKeyUsed: venueSigningKeyUsed(orderResult),
       signature: orderResult.orderId,
       txSignature: orderResult.orderId,
       fillPrice: orderResult.fillPrice,
@@ -1351,7 +1354,7 @@ async function executePerpOrder(
       swiftOrderId: null,
     };
   } catch (error: any) {
-    return { success: false, error: error.message || String(error) };
+    return { success: false, error: error.message || String(error), keyFailureKind: signingKeyFailure(error) };
   } finally {
     signing?.cleanup();
   }
@@ -1543,11 +1546,13 @@ async function closePerpPosition(
   subscriberAccounting = false,
   pendingDraft?: BotTrade,
   closeSourceKey?: string,
-): Promise<{ success: boolean; terminal?: boolean; intentStatus?: string; message?: string; pendingTradeId?: string; submissionAccepted?: boolean; signature?: string; error?: string; executionMethod?: string; fillPrice?: number; actualFee?: number; feeEvidence: CloseFeeEvidence; closeResult?: CloseResult; subscriberAccounting?: SubscriberCloseAccounting }> {
+): Promise<{ success: boolean; terminal?: boolean; intentStatus?: string; message?: string; pendingTradeId?: string; submissionAccepted?: boolean; signature?: string; error?: string; executionMethod?: string; fillPrice?: number; actualFee?: number; feeEvidence: CloseFeeEvidence; closeResult?: CloseResult; subscriberAccounting?: SubscriberCloseAccounting; keyFailureKind?: import('@shared/signal-key-failures').SignalKeyFailureKind; signingKeyUsed?: boolean; venue?: string; httpStatus?: number }> {
   let signing: Awaited<ReturnType<typeof _resolveSigningContext>> | null = null;
   let closeResult: CloseResult | undefined;
   let durableTradeId: string | undefined;
   let closeLock: string | undefined;
+  let signingKeyUsed = false;
+  let signingMetadata: { venue?: string; httpStatus?: number; keyFailureKind?: import('@shared/signal-key-failures').SignalKeyFailureKind } = {};
   try {
     signing = await _resolveSigningContext(encryptedPrivateKey, subAccountId, botCtx ?? null);
     const agentPubKey = expectedAgentPubkey && !botCtx ? expectedAgentPubkey : signing.publicKey;
@@ -1623,8 +1628,15 @@ async function closePerpPosition(
         }, trade: insertBotTradeSchema.parse({ ...draft, status: 'pending' }), kind: confirmFullClose ? 'full' : 'partial', positionSide });
       durableTradeId = submitted.intent.original_trade_id;
       if (pendingDraft) pendingDraft.id = submitted.intent.original_trade_id;
+      const attempt = submitted.intent.attempt_log[submitted.intent.attempt_log.length - 1];
+      const accepted = attempt?.outcome?.kind === 'acknowledged';
+      const outcome = submitted.created ? attempt?.outcome : undefined;
+      signingMetadata = { venue: outcome?.venue, httpStatus: outcome?.httpStatus, keyFailureKind: outcome ? signingKeyFailure(outcome) : undefined };
+      signingKeyUsed = !!outcome && venueSigningKeyUsed({ ...outcome, success: accepted,
+        status: outcome.signingProof === 'terminal_non_auth_rejection' ? 'rejected' : 'unknown',
+        landingDisposition: outcome.signingProof === 'terminal_non_auth_rejection' ? 'terminal' : 'unconfirmed' });
       if (submitted.intent.status === 'released') return {
-        pendingTradeId: durableTradeId, success: false, terminal: true, intentStatus: 'released',
+        signingKeyUsed, ...signingMetadata, pendingTradeId: durableTradeId, success: false, terminal: true, intentStatus: 'released',
         message: submitted.intent.release_mode === 'not_sent' ? CLOSE_NOT_SENT
           : submitted.intent.release_mode === 'still_open' ? 'Close expired without confirmation. The position is still open. You can close it again.'
           : submitted.intent.release_mode === 'residual' ? 'Part of the position is still open.' : 'Position closed. Accounting is unavailable.',
@@ -1632,8 +1644,6 @@ async function closePerpPosition(
         closeResult: { outcome: 'rejected', account: agentPubKey, market, reason: 'close_released' },
         feeEvidence: { kind: 'unavailable', reason: 'close_released' },
       };
-      const attempt = submitted.intent.attempt_log[submitted.intent.attempt_log.length - 1];
-      const accepted = attempt?.outcome?.kind === 'acknowledged';
       orderResult = { success: accepted, orderId: attempt?.outcome?.orderId, status: accepted ? 'filled' : 'unknown',
         landingDisposition: accepted ? undefined : 'unconfirmed', fee: undefined, fillPrice: undefined, fillSize: undefined,
         error: submitted.intent.last_error_code ?? 'close_confirmation_pending' };
@@ -1647,7 +1657,7 @@ async function closePerpPosition(
       const exact = proven && fill && fill.realizedPnl !== null ? fill : null;
       const accounting = subscriberAccounting ? submitted.intent.last_evidence.subscriberAccounting as SubscriberCloseAccounting | undefined : undefined;
       if (accounting && submitted.intent.last_evidence.closeResult) closeResult = submitted.intent.last_evidence.closeResult as CloseResult;
-      return { pendingTradeId: durableTradeId, success: proven, terminal: proven, intentStatus: submitted.intent.status,
+      return { signingKeyUsed, ...signingMetadata, pendingTradeId: durableTradeId, success: proven, terminal: proven, intentStatus: submitted.intent.status,
         submissionAccepted: accepted, signature: orderResult.orderId, closeResult, subscriberAccounting: accounting,
         error: proven ? undefined : 'close_confirmation_pending', executionMethod: 'adapter',
         fillPrice: accounting?.price != null ? Number(accounting.price) : fill?.fillPrice, actualFee: accounting?.fee != null ? Number(accounting.fee) : fill?.fee,
@@ -1661,6 +1671,8 @@ async function closePerpPosition(
       orderResult = await adapter.closePosition({ agentPublicKey: agentPubKey, agentSecretKey: signing.secretKey,
         mainWalletAddress, internalSymbol: market, subaccountId: signing.subaccountId });
     }
+    signingMetadata = { venue: orderResult.venue, httpStatus: orderResult.httpStatus, keyFailureKind: signingKeyFailure(orderResult) };
+    signingKeyUsed = venueSigningKeyUsed(orderResult);
     if (closeResult && adapter.protocolName !== 'pacifica') {
       const settledAt = Date.now();
       try {
@@ -1688,7 +1700,7 @@ async function closePerpPosition(
           account: agentPubKey, market, orderId: orderResult.orderId, openSide: positionSide!,
           requestedSize: positionSizeBase!, sentAt, baseline, closeResult,
         });
-        return { pendingTradeId: durableTradeId, success: isConfirmedClose(closeResult), submissionAccepted: orderResult.success, signature: orderResult.orderId, closeResult,
+        return { signingKeyUsed, ...signingMetadata, pendingTradeId: durableTradeId, success: isConfirmedClose(closeResult), submissionAccepted: orderResult.success, signature: orderResult.orderId, closeResult,
           error: isConfirmedClose(closeResult) ? undefined : closeResult.reason, executionMethod: 'adapter',
           subscriberAccounting: accounting, fillPrice: accounting.price === null ? undefined : Number(accounting.price),
           actualFee: accounting.fee === null ? undefined : Number(accounting.fee),
@@ -1699,7 +1711,7 @@ async function closePerpPosition(
         adapter, account: agentPubKey, market, openSide: positionSide!, expectedSize: positionSizeBase!,
         closeSentAtMs: sentAt, expectedOrderId: orderResult.orderId,
       }) : null;
-      return { pendingTradeId: durableTradeId, success: isConfirmedClose(closeResult), submissionAccepted: orderResult.success,
+      return { signingKeyUsed, ...signingMetadata, pendingTradeId: durableTradeId, success: isConfirmedClose(closeResult), submissionAccepted: orderResult.success,
         signature: orderResult.orderId, closeResult,
         error: isConfirmedClose(closeResult) ? undefined : closeResult.reason, executionMethod: 'adapter',
         fillPrice: fills?.fillPrice, actualFee: fills?.fee,
@@ -1715,7 +1727,7 @@ async function closePerpPosition(
         adapter, account: agentPubKey, market, openSide: positionSide!, expectedSize: positionSizeBase!,
         closeSentAtMs: sentAt, expectedOrderId: orderResult.orderId,
       }) : null;
-      return { pendingTradeId: durableTradeId, success: isConfirmedClose(closeResult), submissionAccepted: orderResult.success,
+      return { signingKeyUsed, ...signingMetadata, pendingTradeId: durableTradeId, success: isConfirmedClose(closeResult), submissionAccepted: orderResult.success,
         signature: orderResult.orderId, closeResult, subscriberAccounting: accounting,
         error: isConfirmedClose(closeResult) ? undefined : closeResult.reason, executionMethod: 'adapter',
         fillPrice: accounting?.price != null ? Number(accounting.price) : fills?.fillPrice,
@@ -1730,7 +1742,7 @@ async function closePerpPosition(
         account: agentPubKey, market, orderId: orderResult.orderId, openSide: positionSide!,
         requestedSize: positionSizeBase!, sentAt, baseline, closeResult,
       });
-      return { pendingTradeId: durableTradeId, success: orderResult.success, signature: orderResult.orderId, closeResult, subscriberAccounting: accounting,
+      return { signingKeyUsed, ...signingMetadata, pendingTradeId: durableTradeId, success: orderResult.success, signature: orderResult.orderId, closeResult, subscriberAccounting: accounting,
         error: orderResult.error, executionMethod: 'adapter',
         fillPrice: accounting.price === null ? undefined : Number(accounting.price),
         feeEvidence: accounting.fee === null ? { kind: 'unavailable', reason: accounting.reason ?? 'exact_close_fee_unavailable' }
@@ -1752,6 +1764,7 @@ async function closePerpPosition(
       rateQuote: feeRateQuote,
     });
     return {
+      signingKeyUsed, ...signingMetadata,
       pendingTradeId: durableTradeId,
       success: orderResult.success,
       signature: orderResult.orderId,
@@ -1765,6 +1778,8 @@ async function closePerpPosition(
     return {
       pendingTradeId: durableTradeId,
       success: false,
+      ...signingMetadata, signingKeyUsed, venue: error.venue ?? signingMetadata.venue, httpStatus: error.httpStatus ?? signingMetadata.httpStatus,
+      keyFailureKind: signingKeyFailure(error) ?? signingMetadata.keyFailureKind,
       error: error.message === "A close is already in progress for this position. We'll update it when that finishes." ? error.message
         : adapter.protocolName === 'pacifica' && !durableTradeId ? CLOSE_SAVE_FAILED : error.message || String(error),
       feeEvidence: { kind: 'unavailable', reason: 'close_execution_failed' },
@@ -5655,6 +5670,7 @@ interface ExecuteSignalBotFlipInput {
   webhookPayload: unknown;
   executionLabel: "per_bot" | "user_webhook" | "subscriber";
   finalizer: "per_bot" | "user_webhook";
+  observeSigningResult?: (...args: Parameters<ReturnType<typeof signalKeyFailureTracker>["observe"]>) => Promise<unknown>;
 }
 
 async function executeSignalBotFlipClose(
@@ -5720,6 +5736,7 @@ async function executeSignalBotFlipClose(
         true, pending.id, input.bot.id, input.executionLabel === 'subscriber', pending,
         `flip:${input.bot.id}:${String((input.webhookPayload as any)?.closeSourceId)}`,
       );
+      await input.observeSigningResult?.(result);
       if (input.bot.activeProtocol === 'pacifica' && !result.pendingTradeId) throw new Error(CLOSE_SAVE_FAILED);
       closeTradeId = result.pendingTradeId ?? closeTradeId;
       flipCloseResult = result.closeResult;
@@ -6089,7 +6106,11 @@ export async function routeSignalToSubscribers(
           const pauseReason = subWallet.emergencyStopTriggered
             ? 'emergency_stopped'
             : 'execution_disabled';
-          await storage.markBotSubscriptionPausedBySubscriberBotId(subBot.id, pauseReason);
+          const transitioned = await storage.markBotSubscriptionPausedBySubscriberBotId(subBot.id, pauseReason);
+          if (transitioned && pauseReason === 'execution_disabled') void sendTradeNotification(subBot.walletAddress, {
+            type: 'bot_paused', botName: subBot.name, market: subBot.market,
+            error: 'Subscription paused because its trading key could not be used (execution_disabled). Re-enable automated trading, then resume the subscription.',
+          }).catch(error => console.error('[Subscriber Routing] Pause notification failed', error));
           console.warn(`[Subscriber Routing] Subscriber ${subBot.walletAddress.slice(0,8)}... has no UMK (${pauseReason}); subscription paused, signal skipped for bot ${subBot.id}`);
           await storage.createBotTrade({
             tradingBotId: subBot.id,
@@ -6114,7 +6135,11 @@ export async function routeSignalToSubscribers(
         );
         if (!agentKeyResult) {
           umkResult.cleanup();
-          await storage.markBotSubscriptionPausedBySubscriberBotId(subBot.id, 'v3_decrypt_failed');
+          const transitioned = await storage.markBotSubscriptionPausedBySubscriberBotId(subBot.id, 'v3_decrypt_failed');
+          if (transitioned) void sendTradeNotification(subBot.walletAddress, {
+            type: 'bot_paused', botName: subBot.name, market: subBot.market,
+            error: 'Subscription paused because its trading key could not be used (v3_decrypt_failed). Reconnect the agent wallet, then resume the subscription.',
+          }).catch(error => console.error('[Subscriber Routing] Pause notification failed', error));
           console.error(`[Subscriber Routing] V3 strict decrypt failed for subscriber ${subBot.walletAddress.slice(0,8)}...; subscription paused, signal skipped for bot ${subBot.id}`);
           await storage.createBotTrade({
             tradingBotId: subBot.id,
@@ -6468,7 +6493,7 @@ export async function routeSignalToSubscribers(
             
             if (sizingResult.shouldPauseBot && sizingResult.pauseReason) {
               const paused = await pauseSignalBotIfFlat(subBot, sizingResult.pauseReason, subWallet.agentPublicKey!, subBotCtx);
-              if (paused) console.log(`[Subscriber Routing] Bot ${subBot.id} paused: ${sizingResult.pauseReason}`);
+              if (paused === 'paused') console.log(`[Subscriber Routing] Bot ${subBot.id} paused: ${sizingResult.pauseReason}`);
             }
             return 'tradeFailed';
           }
@@ -10849,7 +10874,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       if (!sizingResult.success) {
         const paused = sizingResult.shouldPauseBot && sizingResult.pauseReason
-          ? await pauseSignalBotIfFlat(bot, sizingResult.pauseReason, wallet.agentPublicKey, manualBotCtx, false) : false;
+          ? (await pauseSignalBotIfFlat(bot, sizingResult.pauseReason, wallet.agentPublicKey, manualBotCtx, false)) === 'paused' : false;
         // Early failure (no on-chain order placed yet) — fire trade_failed
         // so the user is notified of sizing / top-up failures (insufficient
         // collateral, etc.) the same way as executor failures.
@@ -19797,6 +19822,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       };
       if (!bot.isActive) {
+        void signalKeyFailureTracker(bot).recover();
         if (!pausedClassification || !['FULL_CLOSE', 'PARTIAL_CLOSE', 'FLIP'].includes(pausedClassification.type)) {
           routePausedSource();
           await storage.updateWebhookLog(log.id, { errorMessage: pausedRoutingSignal?.action ? "Bot is paused (subscriber routing requested)" : "Bot is paused" });
@@ -19812,6 +19838,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(404).json({ error: "Wallet not found" });
       }
       
+      const keyFailures = signalKeyFailureTracker(bot);
+
       if (ownerWallet.emergencyStopTriggered) {
         routePausedSource();
         await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Emergency stop active" });
@@ -19838,6 +19866,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         } else {
           await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization required" });
         }
+        await keyFailures.fail('execution_disabled');
         return res.status(403).json({ error: "Trade execution disabled. Please enable automated trading in the app." });
       }
       
@@ -19866,6 +19895,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           umkEncryptedForExecution: null,
           executionExpiresAt: null,
         });
+        await keyFailures.fail('execution_expired');
         return res.status(403).json({ error: "Trade execution authorization expired. Please re-enable automated trading." });
       }
 
@@ -19874,6 +19904,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const umkResult = await getUmkForWebhook(bot.walletAddress);
       if (!umkResult) {
         routePausedSource();
+        await keyFailures.fail('umk_unwrap');
         await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Invalid execution authorization" });
         return res.status(403).json({ error: "Invalid execution authorization. Please re-enable automated trading." });
       }
@@ -19887,8 +19918,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           bot.policyHmac || ''
         );
         if (!policyValid) {
-          umkResult.cleanup();
           routePausedSource();
+          umkResult.cleanup();
+          await keyFailures.fail('policy_hmac');
           await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Bot policy tampered" });
           return res.status(403).json({ error: "Bot configuration has been tampered with. Please reconfigure the bot." });
         }
@@ -19906,8 +19938,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       umkResult.cleanup();
       
       if (!agentKeyResult) {
-        // Agent key decryption failed - this is a critical error
         routePausedSource();
+        // Agent key decryption failed - this is a critical error
+        await keyFailures.fail(!ownerWallet.agentPublicKey || !ownerWallet.agentPrivateKeyEncryptedV3 ? 'agent_missing' : 'agent_decrypt');
         await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Agent key decryption failed" });
         recordCriticalError({
           category: "security",
@@ -19936,12 +19969,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const nonZeroBytes = Array.from(agentKeyResult.secretKey).filter(b => b !== 0).length;
       console.log(`[Webhook] Secret key validation: length=${agentKeyResult.secretKey.length}, nonZeroBytes=${nonZeroBytes}`);
       if (nonZeroBytes === 0) {
-        cleanupAgentKey();
         routePausedSource();
+        cleanupAgentKey();
+        await keyFailures.fail('agent_invalid');
         await storage.updateWebhookLog(log.id, { errorMessage: "Agent key is all zeros - possible encryption/decryption issue" });
         return res.status(500).json({ error: "Agent key decryption produced invalid key (all zeros). Please reconfigure your agent wallet." });
       }
       
+      if (ownerWallet.agentPublicKey && ownerWallet.agentPrivateKeyEncryptedV3) await keyFailures.agentDecrypted();
+
       // Convert secretKey (Uint8Array) to base58 for passing to executor
       const privateKeyBase58 = bs58.encode(agentKeyResult.secretKey);
       
@@ -20146,6 +20182,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         const wallet = await storage.getWallet(bot.walletAddress);
         if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
           routePausedSource();
+          await keyFailures.fail('agent_missing');
           await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured for close", processed: true });
           return res.status(400).json({ error: "Agent wallet not configured" });
         }
@@ -20270,6 +20307,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             true, closeTrade.id, bot.id, false, closeTrade, `webhook:${log.id}`,
           );
           
+          void keyFailures.observe(result);
           if (result.terminal && result.intentStatus === 'released') {
             await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: false, errorMessage: CLOSE_NOT_SENT });
             return res.json({ success: false, terminal: true, status: 'released', tradeId: result.pendingTradeId, message: result.message });
@@ -20767,6 +20805,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           const pcWallet = await storage.getWallet(bot.walletAddress);
           if (!pcWallet?.agentPublicKey) {
             routePausedSource();
+            await keyFailures.fail('agent_missing');
             await storage.updateWebhookLog(log.id, { errorMessage: "No agent wallet for partial close", processed: true });
             return res.status(400).json({ error: "Agent wallet not configured" });
           }
@@ -20792,6 +20831,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             false, undefined, bot.id, false, undefined, `partial:${log.id}`,
           );
 
+          void keyFailures.observe(pcResult);
           durablePartialOwnsFanout = bot.activeProtocol === 'pacifica'
             && ((!!pcResult.pendingTradeId && pcResult.intentStatus !== 'released') || pcResult.error === CLOSE_IN_PROGRESS);
           if (!durablePartialOwnsFanout) routePausedSource();
@@ -20937,6 +20977,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const wallet = await storage.getWallet(bot.walletAddress);
       if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
         routePausedSource();
+        await keyFailures.fail('agent_missing');
         await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured", processed: true });
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
@@ -20947,6 +20988,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       let flipDisposition: SignalBotFlipDisposition | null = null;
       if (isFlipSignal) {
         flipDisposition = await executeSignalBotFlipClose({
+          observeSigningResult: async result => { void keyFailures.observe(result); return false; },
           bot,
           classifiedSignal: classifiedSignal as typeof classifiedSignal & { type: "FLIP" },
           authority: {
@@ -21119,6 +21161,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const openExecEndTime = Date.now();
       console.log(`[Webhook] ⏱️ OPEN EXEC END at +${openExecEndTime - webhookStartTime}ms (took ${openExecEndTime - openExecStartTime}ms), success=${orderResult.success}`);
 
+      const keyTransitionNotice = orderResult.success
+        ? (void keyFailures.observe(orderResult), undefined) : await keyFailures.observe(orderResult);
       if (!orderResult.success) {
         const userFriendlyError = parseDriftError(orderResult.error);
         console.log(`[Webhook] Trade failed: ${orderResult.error}`);
@@ -21127,8 +21171,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         // Check if this is a transient error (rate limit, price feed, oracle) or temporary collateral issue - queue for automatic retry
         // (isCollateralRetryError hard-excludes the unconfirmed-landing verdict — the tx may still land)
         const errorToCheck = orderResult.error || '';
-        const isTransient = isTransientError(errorToCheck);
-        const isCollateralError = isCollateralRetryError(errorToCheck);
+        const isTransient = !orderResult.keyFailureKind && isTransientError(errorToCheck);
+        const isCollateralError = !orderResult.keyFailureKind && isCollateralRetryError(errorToCheck);
         console.log(`[Webhook] Retry eligibility: isTransient=${isTransient}, isCollateralError=${isCollateralError}, error="${errorToCheck.slice(0, 100)}..."`);
         
         // Also retry on InsufficientCollateral - sometimes it's a temporary condition due to oracle price spikes
@@ -21179,8 +21223,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         });
         await storage.updateWebhookLog(log.id, { errorMessage: orderResult.error || "Order execution failed", processed: true });
         
-        // Send trade failed notification
-        sendTradeNotification(wallet.address, {
+        // The threshold claim owns the single transition notification.
+        if (keyTransitionNotice === undefined || keyTransitionNotice === 'failed') sendTradeNotification(wallet.address, {
           type: 'trade_failed',
           botName: bot.name,
           market: bot.market,
@@ -21329,6 +21373,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       } finally {
         // PHASE 6.2: Ensure agent key is cleaned up after execution
         cleanupAgentKey();
+        await keyFailures.finish();
       }
     } catch (error) {
       console.error("Webhook processing error:", error);
@@ -21400,7 +21445,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
         throw dbError;
       }
+      if (!bot.isActive) void signalKeyFailureTracker(bot).recover();
       const userWebhookBotCtx = getBotSubaccountContext(bot);
+
+      const keyFailures = signalKeyFailureTracker(bot);
 
       // Security v3: Check execution authorization
       if (wallet.emergencyStopTriggered) {
@@ -21409,6 +21457,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       
       if (!wallet.executionEnabled) {
+        await keyFailures.fail('execution_disabled');
         await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization required" });
         return res.status(403).json({ error: "Trade execution disabled. Please enable automated trading in the app." });
       }
@@ -21420,6 +21469,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           umkEncryptedForExecution: null,
           executionExpiresAt: null,
         });
+        await keyFailures.fail('execution_expired');
         await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization expired" });
         return res.status(403).json({ error: "Trade execution authorization expired. Please re-enable automated trading." });
       }
@@ -21427,6 +21477,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // Security v3: Verify execution key can be unwrapped (validates SERVER_EXECUTION_KEY is correct)
       const umkResult = await getUmkForWebhook(walletAddress);
       if (!umkResult) {
+        await keyFailures.fail('umk_unwrap');
         await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Invalid execution authorization" });
         return res.status(403).json({ error: "Invalid execution authorization. Please re-enable automated trading." });
       }
@@ -21441,6 +21492,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         );
         if (!policyValid) {
           umkResult.cleanup();
+          await keyFailures.fail('policy_hmac');
           await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Bot policy tampered" });
           return res.status(403).json({ error: "Bot configuration has been tampered with. Please reconfigure the bot." });
         }
@@ -21458,6 +21510,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       umkResult.cleanup();
       
       if (!agentKeyResult) {
+        await keyFailures.fail(!wallet.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3 ? 'agent_missing' : 'agent_decrypt');
         // Agent key decryption failed - this is a critical error
         await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Agent key decryption failed" });
         recordCriticalError({
@@ -21489,23 +21542,27 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         const derivedPubkey = derivedKeypair.publicKey.toBase58();
         
         if (derivedPubkey !== wallet.agentPublicKey) {
+          agentKeyResult.cleanup();
+          await keyFailures.fail('agent_invalid');
           console.error(`[User Webhook] CRITICAL: Agent key mismatch!`);
           console.error(`  Derived pubkey: ${derivedPubkey}`);
           console.error(`  Expected pubkey: ${wallet.agentPublicKey}`);
           console.error(`  Wallet has v3 key: ${!!wallet.agentPrivateKeyEncryptedV3}`);
           console.error(`  Wallet has legacy key (v3 field): ${!!wallet.agentPrivateKeyEncryptedV3}`);
-          agentKeyResult.cleanup();
           await storage.updateWebhookLog(log.id, { errorMessage: "Agent key mismatch - security error" });
           return res.status(500).json({ error: "Agent key verification failed. Please reconfigure your agent wallet in Settings." });
         }
         console.log(`[User Webhook] Agent key verified: ${derivedPubkey.slice(0, 8)}... matches stored pubkey`);
       } catch (verifyErr: any) {
-        console.error(`[User Webhook] Agent key verification failed: ${verifyErr.message}`);
         agentKeyResult.cleanup();
+        await keyFailures.fail('agent_invalid');
+        console.error(`[User Webhook] Agent key verification failed: ${verifyErr.message}`);
         await storage.updateWebhookLog(log.id, { errorMessage: `Agent key verification failed: ${verifyErr.message}` });
         return res.status(500).json({ error: "Agent key verification failed. Please reconfigure your agent wallet." });
       }
       
+      if (wallet.agentPublicKey && wallet.agentPrivateKeyEncryptedV3) await keyFailures.agentDecrypted();
+
       // Helper to cleanup agent key after use
       const cleanupAgentKey = () => {
         agentKeyResult.cleanup();
@@ -21653,6 +21710,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           // Get wallet for execution
           const wallet = await storage.getWallet(walletAddress);
           if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
+            await keyFailures.fail('agent_missing');
             await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured for close", processed: true });
             return res.status(400).json({ error: "Agent wallet not configured" });
           }
@@ -21773,6 +21831,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             true, closeTrade.id, bot.id, false, closeTrade, `webhook:${log.id}`,
           );
           
+          void keyFailures.observe(result);
           if (result.terminal && result.intentStatus === 'released') {
             await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: false, errorMessage: CLOSE_NOT_SENT });
             return res.json({ success: false, terminal: true, status: 'released', message: result.message });
@@ -22297,6 +22356,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           const pcWallet = await storage.getWallet(walletAddress);
           if (!pcWallet?.agentPublicKey) {
             routePausedSource();
+            await keyFailures.fail('agent_missing');
             await storage.updateWebhookLog(log.id, { errorMessage: "No agent wallet for partial close", processed: true });
             return res.status(400).json({ error: "Agent wallet not configured" });
           }
@@ -22322,6 +22382,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             false, undefined, bot.id, false, undefined, `partial:${log.id}`,
           );
 
+          void keyFailures.observe(pcResult);
           durablePartialOwnsFanout = bot.activeProtocol === 'pacifica'
             && ((!!pcResult.pendingTradeId && pcResult.intentStatus !== 'released') || pcResult.error === CLOSE_IN_PROGRESS);
           if (!durablePartialOwnsFanout) routePausedSource();
@@ -22453,6 +22514,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         const uwFlipSubaccountId = userWebhookBotCtx ? 0 : (bot.driftSubaccountId ?? 0);
         const uwFlipQueryAccount = userWebhookBotCtx ? userWebhookBotCtx.botPublicKey : wallet.agentPublicKey!;
         uwFlipDisposition = await executeSignalBotFlipClose({
+          observeSigningResult: async result => { void keyFailures.observe(result); return false; },
           bot,
           classifiedSignal: uwClassified as typeof uwClassified & { type: "FLIP" },
           authority: {
@@ -22522,6 +22584,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // Get wallet's agent private key for signing
       const userWallet = await storage.getWallet(walletAddress);
       if (!userWallet?.agentPrivateKeyEncryptedV3) {
+        await keyFailures.fail('agent_missing');
         await storage.updateBotTrade(trade.id, {
           status: "failed",
           txSignature: null,
@@ -22626,15 +22689,17 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         getAdapterForBot(bot),
       ));
 
+      if (orderResult.success) void keyFailures.observe(orderResult);
       if (!orderResult.success) {
+        const keyTransitionNotice = await keyFailures.observe(orderResult);
         const userFriendlyError = parseDriftError(orderResult.error);
         console.log(`[User Webhook] Trade failed: ${orderResult.error}`);
         
         // Check if this is a transient error (rate limit, timeout, price feed) - queue for automatic retry
         // (isCollateralRetryError hard-excludes the unconfirmed-landing verdict — the tx may still land)
         const errorToCheck = orderResult.error || '';
-        const isTransient = isTransientError(errorToCheck);
-        const isCollateralError = isCollateralRetryError(errorToCheck);
+        const isTransient = !orderResult.keyFailureKind && isTransientError(errorToCheck);
+        const isCollateralError = !orderResult.keyFailureKind && isCollateralRetryError(errorToCheck);
         console.log(`[User Webhook] Retry eligibility: isTransient=${isTransient}, isCollateralError=${isCollateralError}, error="${errorToCheck.slice(0, 100)}..."`);
         
         if (isTransient || isCollateralError) {
@@ -22684,8 +22749,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         });
         await storage.updateWebhookLog(log.id, { errorMessage: orderResult.error || "Order execution failed", processed: true });
         
-        // Send trade failed notification
-        sendTradeNotification(walletAddress, {
+        // The threshold claim owns the single transition notification.
+        if (keyTransitionNotice === undefined || keyTransitionNotice === 'failed') sendTradeNotification(walletAddress, {
           type: 'trade_failed',
           botName: bot.name,
           market: bot.market,
@@ -22808,6 +22873,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       } finally {
         // PHASE 6.2: Ensure agent key is cleaned up after execution
         cleanupAgentKey();
+        await keyFailures.finish();
       }
     } catch (error) {
       console.error("User webhook processing error:", error);

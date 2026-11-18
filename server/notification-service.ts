@@ -5,7 +5,7 @@ import { escapeTelegramHtml } from "./telegram-html";
 import type { BorrowHealthUnavailableReasonCode } from "./vault/borrow-health";
 
 export interface TradeNotification {
-  type: 'trade_executed' | 'trade_failed' | 'position_closed' | 'partial_close' | 'ai_trader_graduation';
+  type: 'trade_executed' | 'trade_failed' | 'bot_paused' | 'position_closed' | 'partial_close' | 'ai_trader_graduation';
   botName: string;
   market: string;
   side?: 'LONG' | 'SHORT';
@@ -125,7 +125,8 @@ export async function sendGridOwnerNotification(walletAddress:string,title:strin
 
 export async function sendTradeNotification(
   walletAddress: string | undefined | null,
-  notification: TradeNotification
+  notification: TradeNotification,
+  options?: { signal?: AbortSignal; throwOnDeliveryError?: boolean },
 ): Promise<boolean> {
   try {
     if (!walletAddress) {
@@ -152,6 +153,7 @@ export async function sendTradeNotification(
     const shouldNotify = 
       (notification.type === 'trade_executed' && wallet.notifyTradeExecuted) ||
       (notification.type === 'trade_failed' && wallet.notifyTradeFailed) ||
+      (notification.type === 'bot_paused' && wallet.notifyTradeFailed) ||
       (notification.type === 'position_closed' && wallet.notifyPositionClosed) ||
       // partial_close ties to the same flag as position_closed
       (notification.type === 'partial_close' && wallet.notifyPositionClosed) ||
@@ -178,15 +180,18 @@ export async function sendTradeNotification(
       wallet.telegramChatId,
       message,
       buildDefaultInlineKeyboard(),
+      options?.signal,
     );
     
     if (success) {
       console.log(`[Notifications] Successfully sent Telegram notification to ${walletAddress}`);
     }
     
+    if (!success && options?.throwOnDeliveryError) throw new Error('trade_notification_delivery_failed');
     return success;
   } catch (error) {
     console.error('[Notifications] Error sending notification:', error);
+    if (options?.throwOnDeliveryError) throw error;
     return false;
   }
 }
@@ -605,6 +610,8 @@ export function formatNotificationMessage(notification: TradeNotification): { ti
       };
     }
     
+    case 'bot_paused':
+      return { title: 'Bot trading key needs attention', body: `${botName}: ${market} - ${error || 'Trading key unavailable'}` };
     case 'trade_failed':
       return {
         title: `❌ Trade Failed`,

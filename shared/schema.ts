@@ -195,6 +195,7 @@ export const tradingBots = pgTable("trading_bots", {
     totalPnl: number;
     totalVolume: number;
     lastTradeAt?: string;
+    signalKeyFailures?: import('./signal-key-failures').SignalKeyFailures;
   }>().default({ totalPnl: 0, totalTrades: 0, totalVolume: 0, losingTrades: 0, winningTrades: 0 }),
   sourcePublishedBotId: varchar("source_published_bot_id"),
   labStrategyId: integer("lab_strategy_id"),

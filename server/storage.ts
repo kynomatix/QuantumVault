@@ -785,7 +785,7 @@ export interface IStorage {
   // index for a wallet's per-bot wallets. Burn-on-allocate (never decremented or
   // reused, even if bot creation later fails) so an index always maps to one wallet.
   allocateBotDerivationIndex(walletAddress: string): Promise<number>;
-  updateTradingBot(id: string, updates: Partial<InsertTradingBot>): Promise<TradingBot | undefined>;
+  updateTradingBot(id: string, updates: Partial<InsertTradingBot> & Partial<Pick<TradingBot, 'stats'>>): Promise<TradingBot | undefined>;
   // Auto-repark idle funds: arm the debounce deadline when a position fully closes,
   // clear it when a new position opens, and atomically claim every due bot (so the
   // periodic scanner processes each exactly once). See server/vault/auto-repark.ts.
@@ -1041,7 +1041,14 @@ export interface IStorage {
   // discovers a subscriber whose execution authorization has been revoked or
   // emergency-stopped, so the UI can surface "Your subscription is paused
   // because execution authorization was revoked".
-  markBotSubscriptionPausedBySubscriberBotId(subscriberBotId: string, reason: string): Promise<void>;
+  markBotSubscriptionPausedBySubscriberBotId(subscriberBotId: string, reason: string): Promise<boolean>;
+  incrementSignalKeyFailure(id: string, kind: import('@shared/signal-key-failures').SignalKeyFailureKind): Promise<import('@shared/signal-key-failures').SignalKeyFailures | undefined>;
+  clearSignalKeyFailures(id: string): Promise<void>;
+  reclaimPausedSignalKeyFailureNotice(id: string): Promise<import('@shared/signal-key-failures').SignalKeyFailures | undefined>;
+  claimSignalKeyFailureAlert(id: string, firstAt: string): Promise<string | false>;
+  refreshSignalKeyFailureAlert(id: string, firstAt: string, claimedAt: string, requireActive?: boolean): Promise<string | false>;
+  setSignalKeyFailurePauseOutcome(id: string, firstAt: string, outcome: import('@shared/signal-key-failures').SignalKeyPauseOutcome | 'paused' | 'already_paused', claimedAt: string): Promise<boolean>;
+  pauseActiveSignalBot(id: string, reason: string, firstAt?: string, claimedAt?: string): Promise<TradingBot | undefined>;
 
   // Marketplace: PnL Snapshots
   createPnlSnapshot(snapshot: InsertPnlSnapshot): Promise<PnlSnapshot>;
@@ -2381,13 +2388,100 @@ export class DatabaseStorage implements IStorage {
     return Number(allocated);
   }
 
-  async updateTradingBot(id: string, updates: Partial<InsertTradingBot>): Promise<TradingBot | undefined> {
+  async updateTradingBot(id: string, updates: Partial<InsertTradingBot> & Partial<Pick<TradingBot, 'stats'>>): Promise<TradingBot | undefined> {
     const closeIdentity = await this.getTradingBotById(id);
     const changesIdentity = ['activeProtocol','protocolSubaccountId','subaccountAuthMode','botSubaccountKeyEncrypted','botSubaccountKeyEncryptedV3','driftSubaccountId','subaccountStatus'].some(key => key in updates);
     return (changesIdentity ? (work: () => Promise<TradingBot | undefined>) => closeIntentStore.withBotLifecycle(id, [(updates.activeProtocol ?? closeIdentity?.activeProtocol) === 'pacifica' ? updates.protocolSubaccountId : undefined], work) : (work: () => Promise<TradingBot | undefined>) => work())(async () => {
-    const result = await db.update(tradingBots).set({ ...updates, updatedAt: sql`NOW()` } as any).where(eq(tradingBots.id, id)).returning();
+    const result = await db.update(tradingBots).set({ ...updates,
+      ...(updates.isActive === true ? { stats: updates.stats !== undefined
+        ? updates.stats === null ? null : Object.fromEntries(Object.entries(updates.stats).filter(([key]) => key !== 'signalKeyFailures'))
+        : sql`CASE WHEN ${tradingBots.stats} ? 'signalKeyFailures' THEN ${tradingBots.stats} - 'signalKeyFailures' ELSE ${tradingBots.stats} END` } : {}),
+      updatedAt: sql`NOW()` } as any).where(eq(tradingBots.id, id)).returning();
     return result[0];
     });
+  }
+
+  async incrementSignalKeyFailure(id: string, kind: import('@shared/signal-key-failures').SignalKeyFailureKind): Promise<import('@shared/signal-key-failures').SignalKeyFailures | undefined> {
+    const result = await db.execute(sql`
+      UPDATE trading_bots SET stats = jsonb_set(COALESCE(stats, '{}'::jsonb), '{signalKeyFailures}',
+        COALESCE(stats->'signalKeyFailures', '{}'::jsonb) || jsonb_build_object(
+          'count', COALESCE((stats->'signalKeyFailures'->>'count')::integer, 0) + 1,
+          'kind', ${kind}::text,
+          'firstAt', COALESCE(stats->'signalKeyFailures'->'firstAt', to_jsonb(clock_timestamp())),
+          'lastAt', clock_timestamp(),
+          'alertedAt', stats->'signalKeyFailures'->'alertedAt'))
+      WHERE id = ${id} AND is_active AND active_protocol NOT IN ('phoenix', 'flash')
+      RETURNING stats->'signalKeyFailures' AS streak`);
+    return result.rows[0]?.streak as import('@shared/signal-key-failures').SignalKeyFailures | undefined;
+  }
+
+  async clearSignalKeyFailures(id: string): Promise<void> {
+    await db.execute(sql`UPDATE trading_bots SET stats = COALESCE(stats, '{}'::jsonb) - 'signalKeyFailures'
+      WHERE id = ${id} AND active_protocol NOT IN ('phoenix', 'flash') AND stats ? 'signalKeyFailures'
+        AND NOT (COALESCE(stats->'signalKeyFailures'->>'outcome', '') = 'paused'
+          AND stats->'signalKeyFailures'->>'alertedAt' IS NULL)`);
+  }
+
+  async claimSignalKeyFailureAlert(id: string, firstAt: string): Promise<string | false> {
+    const result = await db.execute(sql`UPDATE trading_bots SET stats = jsonb_set(COALESCE(stats, '{}'::jsonb),
+      '{signalKeyFailures}', ((stats->'signalKeyFailures') - 'pauseOutcome') || jsonb_build_object('claimedAt', clock_timestamp(), 'outcome', NULL))
+      WHERE id = ${id} AND is_active AND active_protocol NOT IN ('phoenix', 'flash')
+        AND stats->'signalKeyFailures'->>'firstAt' = ${firstAt}
+        AND (stats->'signalKeyFailures'->>'count')::integer >= 3
+        AND ((stats->'signalKeyFailures'->>'alertedAt') IS NULL
+          OR (stats->'signalKeyFailures'->>'alertedAt')::timestamptz < now() - interval '24 hours')
+        AND ((stats->'signalKeyFailures'->>'claimedAt') IS NULL
+          OR stats->'signalKeyFailures'->>'outcome' IS NOT NULL
+          OR (stats->'signalKeyFailures'->>'claimedAt')::timestamptz < now() - interval '2 minutes')
+      RETURNING stats->'signalKeyFailures'->>'claimedAt' AS "claimedAt"`);
+    return (result.rows[0]?.claimedAt as string | undefined) ?? false;
+  }
+
+  async reclaimPausedSignalKeyFailureNotice(id: string): Promise<import('@shared/signal-key-failures').SignalKeyFailures | undefined> {
+    const result = await db.execute(sql`UPDATE trading_bots SET stats = jsonb_set(stats,
+      '{signalKeyFailures}', stats->'signalKeyFailures' || jsonb_build_object('claimedAt', clock_timestamp()))
+      WHERE id = ${id} AND NOT is_active AND active_protocol NOT IN ('phoenix', 'flash')
+        AND stats->'signalKeyFailures'->>'outcome' = 'paused'
+        AND stats->'signalKeyFailures'->>'alertedAt' IS NULL
+        AND (stats->'signalKeyFailures'->>'claimedAt')::timestamptz < now() - interval '2 minutes'
+      RETURNING stats->'signalKeyFailures' AS streak`);
+    return result.rows[0]?.streak as import('@shared/signal-key-failures').SignalKeyFailures | undefined;
+  }
+
+  async refreshSignalKeyFailureAlert(id: string, firstAt: string, claimedAt: string, requireActive = false): Promise<string | false> {
+    const result = await db.execute(sql`UPDATE trading_bots SET stats = jsonb_set(stats,
+      '{signalKeyFailures}', stats->'signalKeyFailures' || jsonb_build_object('claimedAt', now()))
+      WHERE id = ${id} AND active_protocol NOT IN ('phoenix', 'flash')
+        AND (NOT ${requireActive} OR is_active)
+        AND stats->'signalKeyFailures'->>'firstAt' = ${firstAt}
+        AND stats->'signalKeyFailures'->>'claimedAt' = ${claimedAt}
+      RETURNING stats->'signalKeyFailures'->>'claimedAt' AS "claimedAt"`);
+    return (result.rows[0]?.claimedAt as string | undefined) ?? false;
+  }
+
+  async setSignalKeyFailurePauseOutcome(id: string, firstAt: string, outcome: import('@shared/signal-key-failures').SignalKeyPauseOutcome | 'paused' | 'already_paused', claimedAt: string): Promise<boolean> {
+    const result = await db.execute(sql`UPDATE trading_bots SET stats = jsonb_set(COALESCE(stats, '{}'::jsonb),
+      '{signalKeyFailures}', stats->'signalKeyFailures' || jsonb_build_object(
+        'alertedAt', clock_timestamp(), 'outcome', ${outcome}::text))
+      WHERE id = ${id} AND active_protocol NOT IN ('phoenix', 'flash')
+        AND (is_active OR ${outcome}::text IN ('paused', 'already_paused'))
+        AND stats->'signalKeyFailures'->>'firstAt' = ${firstAt}
+        AND stats->'signalKeyFailures'->>'claimedAt' = ${claimedAt} RETURNING id`);
+    return result.rows.length > 0;
+  }
+
+  async pauseActiveSignalBot(id: string, reason: string, firstAt?: string, claimedAt?: string): Promise<TradingBot | undefined> {
+    const rows = await db.update(tradingBots).set({ isActive: false, pauseReason: reason,
+        ...(firstAt === undefined ? { updatedAt: sql`NOW()` } : { stats: sql`jsonb_set(${tradingBots.stats}, '{signalKeyFailures}',
+          ((${tradingBots.stats}->'signalKeyFailures') - 'pauseOutcome') || jsonb_build_object('outcome', 'paused', 'alertedAt', NULL))` }),
+      })
+      .where(and(eq(tradingBots.id, id), eq(tradingBots.isActive, true),
+        firstAt === undefined ? undefined : sql`${tradingBots.activeProtocol} NOT IN ('phoenix','flash')
+          AND ${tradingBots.stats}->'signalKeyFailures'->>'firstAt' = ${firstAt}
+          AND ${tradingBots.stats}->'signalKeyFailures'->>'claimedAt' = ${claimedAt ?? null}
+          AND NOT EXISTS (SELECT 1 FROM ${publishedBots}
+            WHERE ${publishedBots.tradingBotId} = ${tradingBots.id})`)).returning();
+    return rows[0];
   }
 
   async scheduleBotAutoParkDueAt(id: string, dueAt: Date): Promise<void> {
@@ -5442,10 +5536,10 @@ export class DatabaseStorage implements IStorage {
   async markBotSubscriptionPausedBySubscriberBotId(
     subscriberBotId: string,
     reason: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     // Look up subscription by subscriberBotId. Only flip 'active' rows so we
     // don't clobber already-cancelled subscriptions.
-    await db
+    const rows = await db
       .update(botSubscriptions)
       .set({ status: 'paused', subscriptionStatusReason: reason })
       .where(
@@ -5453,7 +5547,8 @@ export class DatabaseStorage implements IStorage {
           eq(botSubscriptions.subscriberBotId, subscriberBotId),
           eq(botSubscriptions.status, 'active'),
         ),
-      );
+      ).returning({ id: botSubscriptions.id });
+    return rows.length > 0;
   }
 
   // Marketplace: PnL Snapshots

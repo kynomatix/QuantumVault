@@ -111,6 +111,12 @@ export type OrderStatus =
 export type OrderLandingDisposition = 'terminal' | 'unconfirmed';
 
 export interface OrderResult {
+  /** Structured terminal venue authentication rejection, never inferred from error text. */
+  venue?: 'pacifica';
+  httpStatus?: number;
+  keyFailureKind?: 'venue_auth_rejected';
+  /** SB-01 classification veto; preserves the order's existing landing result. */
+  signingKeyUsed?: false;
   completedEffects?: string[];
   success: boolean;
   constraintRejection?: Extract<ConstraintAdmission, { ok: false }>;

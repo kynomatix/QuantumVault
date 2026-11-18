@@ -14,20 +14,20 @@ const incumbentBaseline = JSON.parse(readFileSync('tests/fixtures/pacifica-order
 // completion and open fencing to both incumbent webhook routes.
 // S13 also pins the 409 close-conflict mapping and canonical partial consumers.
 // Subscriber close safety marks early dispatches and recognizes legacy source full closes.
-// Only the two incumbent webhook spans changed; Phoenix boundaries remain unchanged.
 // Phoenix boundaries and incumbent entry policy remain pinned below.
-incumbentBaseline.routeSha256['post:/api/webhook/tradingview/:botId'] =
-  'sha256:749e3eb4d674f5523b62ce8046dbeb4e169a5cdd4fdd1a3cc8cea81c0eef5a0d';
 // SEC-02 changes authentication order only in the user webhook span.
+
+// SB-01 adds key-failure admission tracking; manual trade maps the pause result to its prior boolean.
+// Pin the incumbent routes with the SB-01 key-failure cleanup and notice disposition.
+incumbentBaseline.routeSha256['post:/api/trading-bots/:id/manual-trade'] =
+  'sha256:2354e246eb6855274a3c2c54f811082e230b9e43aaa7aeda21e30aeac76ba0bd';
+incumbentBaseline.routeSha256['post:/api/webhook/tradingview/:botId'] =
+  'sha256:57711f2f610475a1234ef2f2a8a6dfbd17d6d766c15ab3472d0a37048957dc28';
 incumbentBaseline.routeSha256['post:/api/webhook/user/:walletAddress'] =
-  'sha256:6713bd89830b59d829bb3618e818c5ccda2c4abcaa44b3044a68ebbbbe6418ee';
+  'sha256:93f79ff86089eff8c9819774595d1bcf6642650ea81fb17e431bd9b76dc10e0d';
 
 incumbentBaseline.routeSha256['patch:/api/trading-bots/:id'] =
   'sha256:a80d9069f66e39a80f9613365ea6664fe534a76479072593c16b62f351152b9d';
-
-// SB-04 changes Pacifica auto-pause admission and wraps manual entry in the entry lock.
-incumbentBaseline.routeSha256['post:/api/trading-bots/:id/manual-trade'] =
-  'sha256:79a0b499df634ad9727a925f72c4da682df3983cc106be5d7812e87765fdeb45';
 
 describe('Phoenix U05 exact admission and explicit wire policy', () => {
   it('admits canonical phUSD collateral and refuses a USDC collateral substitution', () => {

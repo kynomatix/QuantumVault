@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs';
+import { closeAuthFixture } from '../helpers/pacifica-close-auth-fetch';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PacificaAdapter } from '../../server/protocol/pacifica/pacifica-adapter.js';
 import { PacificaSigner } from '../../server/protocol/pacifica/pacifica-signer.js';
@@ -113,6 +115,86 @@ describe('Pacifica risk-increasing market-order ambiguity', () => {
     expect(isUnconfirmedLandingResult(result)).toBe(false);
   });
 
+  it.each([401,403,422])('SB01.r7.unreadable.entry.%s.preserves.base.result.without.signing.evidence', async httpStatus => {
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      const response=new Response('EXAMPLE',{status:httpStatus});
+      vi.spyOn(response,'text').mockRejectedValue(new Error('EXAMPLE_BODY_READ'));return response;
+    }));
+    const result=await adapter().placeMarketOrder(request());
+    const {success,status,clientOrderId,error,landingDisposition}=result;
+    expect({success,status,clientOrderId,error,landingDisposition}).toEqual({success:false,status:'rejected',clientOrderId:'client-order-1',
+      error:`PacificaAdapter POST /orders/create_market: ${httpStatus}  \u2014 `,landingDisposition:'terminal'});
+    expect(result.keyFailureKind).toBeUndefined();
+    const modulePath='../../server/trading/signal-key-failures';
+    const classifier=existsSync('server/trading/signal-key-failures.ts')?await import(modulePath):undefined;
+    // On base, missing classification already means no streak evidence.
+    expect(classifier?.signingKeyFailure(result)).toBeUndefined();
+    expect(classifier?.venueSigningKeyUsed(result) ?? false).toBe(false);
+  });
+  it.each([401,403,422])('SB01.r7.unreadable.durable.close.%s.preserves.base.result.without.signing.evidence',async httpStatus=>{
+    vi.stubGlobal('fetch',vi.fn(async()=>{
+      const response=new Response('EXAMPLE',{status:httpStatus});vi.spyOn(response,'text').mockRejectedValue(new Error('EXAMPLE_BODY_READ'));return response;
+    }));
+    const result:any=await adapter().sendPreparedReduceOnlyMarketOrder({account:'EXAMPLE',environment:'http://pacifica.test',market:'BTC-PERP',operationData:{symbol:'BTC',amount:'0.01',side:'ask',reduce_only:true,client_order_id:'EXAMPLE'}} as any,
+      {timestamp:Date.now(),expiry_window:5000} as any,new Uint8Array(64));
+    expect({kind:result.kind,httpStatus:result.httpStatus,cause:result.cause}).toEqual({kind:'ambiguous',httpStatus,cause:'close_http_unresolved'});
+    expect(result.keyFailureKind).toBeUndefined();expect(result.signingProof).toBeUndefined();
+  });
+  it('SB01.r10.durable.close.503.returns.base.outcome.without.reading.body', async () => {
+    const response = new Response(null, { status: 503 });
+    let reading!: () => void;
+    let release!: () => void;
+    const bodyRead = new Promise<void>(resolve => { reading = resolve; });
+    const heldBody = new Promise<string>(resolve => { release = () => resolve('EXAMPLE'); });
+    const text = vi.spyOn(response, 'text').mockImplementation(() => {
+      reading();
+      return heldBody;
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => response));
+    const request = adapter().sendPreparedReduceOnlyMarketOrder({
+      account: 'EXAMPLE', environment: 'http://pacifica.test', market: 'BTC-PERP',
+      operationData: { symbol: 'BTC', amount: '0.01', side: 'ask', reduce_only: true, client_order_id: 'EXAMPLE' },
+    } as any, { timestamp: Date.now(), expiry_window: 5000 } as any, new Uint8Array(64));
+    try {
+      expect(await Promise.race([request, bodyRead.then(() => 'body read')])).toStrictEqual({
+        kind: 'ambiguous', httpStatus: 503, cause: 'close_http_unresolved',
+      });
+      expect(text).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await request;
+    }
+  });
+  it.each([401,403,422])('SB01.r7.unreadable.non.durable.close.%s.preserves.base.throw.without.signing.evidence',async httpStatus=>{
+    vi.restoreAllMocks();const {adapter:subject,params,posts}=await closeAuthFixture(httpStatus,true);
+    try {
+      const error=await subject.closePosition(params).then(()=>expect.fail('expected existing ambiguous throw'),error=>error);
+      expect(error.message).toBe(`PacificaAdapter POST /orders/create_market: timed out awaiting terminal proof for risk-reducing retry (HTTP ${httpStatus} response body was unreadable)`);
+      expect(error.keyFailureKind).toBeUndefined();expect(error.signingProof).toBeUndefined();
+      expect(posts).toHaveLength(1);expect(posts[0].reduce_only).toBe(true);
+    } finally {await subject.shutdown();}
+  });
+  it.each([401,403])('SB01.r2.structured.venue.auth.%s', async httpStatus => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('EXAMPLE', { status: httpStatus })));
+    const result = await adapter().placeMarketOrder(request());
+    expect(result).toMatchObject({ success:false, status:'rejected', landingDisposition:'terminal',
+      venue:'pacifica', httpStatus, keyFailureKind:'venue_auth_rejected' });
+  });
+
+  it.each([401,403])('SB01.r3.durable.close.auth.%s.remains.ambiguous.with.metadata',async httpStatus=>{
+    vi.stubGlobal('fetch',vi.fn(async()=>new Response('EXAMPLE',{status:httpStatus})));
+    const result:any=await adapter().sendPreparedReduceOnlyMarketOrder({account:'EXAMPLE',environment:'http://pacifica.test',market:'BTC-PERP',operationData:{symbol:'BTC',amount:'0.01',side:'ask',reduce_only:true,client_order_id:'EXAMPLE'}} as any,
+      {timestamp:Date.now(),expiry_window:5000} as any,new Uint8Array(64));
+    expect(result).toMatchObject({kind:'ambiguous',venue:'pacifica',httpStatus,keyFailureKind:'venue_auth_rejected',cause:'close_http_unresolved'});
+  });
+  it.each([401,403])('SB01.r4.real.non.durable.close.auth.%s.retains.thrown.metadata',async httpStatus=>{
+    vi.restoreAllMocks();const {adapter:subject,params,posts}=await closeAuthFixture(httpStatus);
+    try {
+      await expect(subject.closePosition(params)).rejects.toMatchObject({venue:'pacifica',httpStatus,keyFailureKind:'venue_auth_rejected',
+        message:expect.stringContaining(`PacificaAdapter POST /orders/create_market: ${httpStatus}`)});
+      expect(posts).toHaveLength(1);expect(posts[0].reduce_only).toBe(true);
+    } finally {await subject.shutdown();}
+  });
   it.each([408, 409, 425, 429, 500, 503])('treats HTTP %s as unconfirmed', async status => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('uncertain', { status })));
     const result = await adapter().placeMarketOrder(request());

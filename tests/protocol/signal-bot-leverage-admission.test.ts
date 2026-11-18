@@ -270,7 +270,7 @@ describe('Signal Bot choke-point wiring', () => {
     const wrapperStart = routesSource.indexOf('async function executePerpOrder(');
     const wrapperEnd = routesSource.indexOf('\nasync function getPerpPositions(', wrapperStart);
     const wrapper = routesSource.slice(wrapperStart, wrapperEnd);
-    expect(wrapper).toContain("return { success: false, error: error.message || String(error) };");
+    expect(wrapper).toContain("return { success: false, error: error.message || String(error), keyFailureKind: signingKeyFailure(error) };");
 
     const parserStart = routesSource.indexOf('function parseDriftError(');
     const parserEnd = routesSource.indexOf('\n// Shared trade sizing', parserStart);
@@ -286,8 +286,8 @@ describe('Signal Bot choke-point wiring', () => {
     const failureBranch = routesSource.slice(failureStart, failureEnd);
     expect(failureAnchor).toBeGreaterThanOrEqual(0);
     expect(failureBranch).toContain('const userFriendlyError = parseDriftError(orderResult.error);');
-    expect(failureBranch).toContain('const isTransient = isTransientError(errorToCheck);');
-    expect(failureBranch).toContain('const isCollateralError = isCollateralRetryError(errorToCheck);');
+    expect(failureBranch).toContain('const isTransient = !orderResult.keyFailureKind && isTransientError(errorToCheck);');
+    expect(failureBranch).toContain('const isCollateralError = !orderResult.keyFailureKind && isCollateralRetryError(errorToCheck);');
     expect(failureBranch).toContain("type: 'trade_failed'");
     expect(failureBranch).toContain('error: userFriendlyError,');
   });

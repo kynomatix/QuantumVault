@@ -1,3 +1,4 @@
+import { SignalBotPauseWarning } from './SignalBotPauseWarning';
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { SignalTradeHistoryChart } from './SignalTradeHistoryChart';
 import { LabSourcePanel } from './LabSourcePanel';
@@ -213,6 +214,7 @@ interface TradingBot {
     totalPnl: number;
     totalVolume?: number;
     lastTradeAt?: string;
+    signalKeyFailures?: import('@shared/signal-key-failures').SignalKeyFailures;
   } | null;
   createdAt: string;
 }
@@ -1587,39 +1589,10 @@ export function BotManagementDrawer({
 
           <TabsContent value="overview" className="space-y-4 mt-4">
             {moneyControls ? (<>
-            {/* Pause reason warning banner */}
-            {displayBot?.pauseReason && !displayBot?.isActive && (
-              <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-start gap-3">
-                <AlertCircle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
-                <div className="space-y-1">
-                  <p className="text-sm font-medium text-amber-500">Bot Paused - Insufficient Margin</p>
-                  <p className="text-xs text-muted-foreground">{displayBot.pauseReason}</p>
-                  <div className="flex gap-2 mt-2">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7 text-xs"
-                      onClick={() => onShowWalletTab?.()}
-                      data-testid="button-add-funds"
-                    >
-                      <Wallet className="w-3 h-3 mr-1" />
-                      Add Funds
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 text-xs"
-                      onClick={() => setActiveTab('settings')}
-                      data-testid="button-enable-auto-topup"
-                    >
-                      <Settings className="w-3 h-3 mr-1" />
-                      Enable Auto Top-Up
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            )}
-            
+            <SignalBotPauseWarning isActive={!!displayBot?.isActive} pauseReason={displayBot?.pauseReason}
+              streak={displayBot?.stats?.signalKeyFailures} onAddFunds={() => onShowWalletTab?.()}
+              onSettings={() => setActiveTab('settings')} />
+
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
                 <p className="text-xs text-muted-foreground">

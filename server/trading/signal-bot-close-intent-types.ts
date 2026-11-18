@@ -4,6 +4,10 @@ export type CloseSendOutcome = {
   kind: 'not_entered' | 'ambiguous' | 'acknowledged' | 'rejected_terminal';
   orderId?: string;
   httpStatus?: number;
+  venue?: string;
+  keyFailureKind?: 'venue_auth_rejected';
+  /** Signing proof only; never changes close landing, replay or release authority. */
+  signingProof?: 'terminal_non_auth_rejection';
   cause?: string;
 };
 

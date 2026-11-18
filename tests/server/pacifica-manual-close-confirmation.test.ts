@@ -1,5 +1,6 @@
 import { insertBotTradeSchema } from '../../shared/schema';
 import { randomUUID } from 'node:crypto';
+import { signingKeyFailure, venueSigningKeyUsed } from '../../server/trading/signal-key-failures';
 import { bridgePreparedClose } from '../helpers/close-route-intent-store';
 import { submitDurableClose } from '../../server/trading/signal-bot-close-intent';
 import { closeIntentStore as signalBotCloseIntentStore } from '../../server/trading/close-intent-store';
@@ -67,7 +68,7 @@ describe('registered manual close and executor boundary', () => {
     if (defect === 'not-sent-new-click') {
       let sends = 0; adapter.sendPreparedReduceOnlyMarketOrder = vi.fn<(...args: any[]) => Promise<CloseSendOutcome>>(async () => ++sends === 1 ? { kind: 'not_entered', cause: 'ENOTFOUND' } : { kind: 'ambiguous', cause: 'EXAMPLE_TIMEOUT' });
     }
-    const deps = { insertBotTradeSchema, crypto: { randomUUID }, submitDurableClose, CLOSE_SAVE_FAILED, CLOSE_NOT_SENT,
+    const deps = { signingKeyFailure, venueSigningKeyUsed, insertBotTradeSchema, crypto: { randomUUID }, submitDurableClose, CLOSE_SAVE_FAILED, CLOSE_NOT_SENT,
       app: { post: (_path: string, _auth: unknown, route: typeof handler) => { handler = route; } }, requireWallet: () => {},
       storage, readCloseSnapshot, closeResultFromObservation, isConfirmedClose, fullClosesInFlight: new Set<string>(),
       getDefaultAdapter: () => adapter, getAdapterForBot: () => adapter,

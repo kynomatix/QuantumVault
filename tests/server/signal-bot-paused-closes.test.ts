@@ -185,6 +185,10 @@ function fill(overrides: Partial<TradeRecord> = {}): TradeRecord {
 }
 function prime(side: 'long' | 'short' = 'long', rows: () => TradeRecord[] = () => [fill()]) {
   vi.clearAllMocks();
+  vi.mocked(storage.pauseActiveSignalBot).mockImplementation(async (id, reason) => {
+    await storage.updateTradingBot(id, { isActive: false, pauseReason: reason });
+    return { ...routeBot, isActive: false, pauseReason: reason } as never;
+  });
   routeMocks.notify.mockReset().mockResolvedValue(undefined);
   routeMocks.adapter.getStrictPositionForMarket.mockReset();
   routeMocks.adapter.getMarkets.mockReset();
@@ -635,10 +639,11 @@ function entryPauseHarness() {
     return node.getText(parsed);
   }).join('\n');
   const port = { active: true, size: 0 };
-  const storagePort = { getTradingBotById: vi.fn(async () => ({ isActive: port.active, walletAddress: ROUTE_WALLET })),
+  const storagePort = { getTradingBotById: vi.fn(async () => ({ ...routeBot, isActive: port.active, walletAddress: ROUTE_WALLET })),
     getWallet: vi.fn(async () => ({ ...routeWallet })),
     getBotPosition: vi.fn(async () => ({ baseSize: String(port.size) })),
-    updateTradingBot: vi.fn(async () => { port.active = false; }) };
+    updateTradingBot: vi.fn(async () => { port.active = false; }),
+    pauseActiveSignalBot: vi.fn(async () => { await storagePort.updateTradingBot(); return { ...routeBot, isActive: false }; }) };
   const venue = { getPositionForCloseAuthority: vi.fn(async () => ({ side: port.size ? 'LONG' : 'FLAT', size: port.size })) };
   const maps = parsed.statements.filter(node => ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration => ['signalBotEntryLocks', 'signalBotAcceptedEntries'].includes(declaration.name.getText(parsed)))).map(node => node.getText(parsed)).join('\n');
   const code = ts.transpileModule((maps + '\n' + declarations).replace(/export /g, ''), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
@@ -654,7 +659,7 @@ describe.skipIf(!hasEntryAdmission)('round2 mutex overlap', () => {
     const pause = h.pauseSignalBotIfFlat(routeBot, 'EXAMPLE', routeWallet.agentPublicKey, null, false);
     await Promise.resolve(); await Promise.resolve();
     expect(h.storagePort.getBotPosition).not.toHaveBeenCalled();
-    release.resolve(); expect(await entry).toEqual({ success: true }); expect(await pause).toBe(false);
+    release.resolve(); expect(await entry).toEqual({ success: true }); expect(await pause).toBe('not_flat');
     expect(h.storagePort.getBotPosition).toHaveBeenCalledTimes(1); expect(h.port.active).toBe(true);
   });
   it('pause in flight blocks entry then refuses submission after pause lands', async () => {
@@ -663,8 +668,8 @@ describe.skipIf(!hasEntryAdmission)('round2 mutex overlap', () => {
     const pause = h.pauseSignalBotIfFlat(routeBot, 'EXAMPLE', routeWallet.agentPublicKey, null, false);
     await proving.promise;
     const submit = vi.fn(async () => ({ success: true })), entry = h.executeSignalBotEntry(routeBot, submit);
-    await Promise.resolve(); await Promise.resolve(); expect(h.storagePort.getTradingBotById).not.toHaveBeenCalled();
-    release.resolve(); expect(await pause).toBe(true); expect(await entry).toEqual({ success: false, error: 'Bot is paused' });
+    await Promise.resolve(); await Promise.resolve(); expect(h.storagePort.getTradingBotById).toHaveBeenCalledTimes(1);
+    release.resolve(); expect(await pause).toBe('paused'); expect(await entry).toEqual({ success: false, error: 'Bot is paused' });
     expect(submit).not.toHaveBeenCalled();
   });
   it('different bots proceed independently and failed submissions release the queue', async () => {
@@ -729,7 +734,7 @@ describe.each(['tv', 'user'] as const)('round2 partial exits %s', path => {
     if (failure === 'terminal') {
       const previous = durableClose.submitDurableClose;
       const spy = vi.spyOn(durableClose, 'submitDurableClose').mockImplementation(async input => input.identity.bot_id === source.id
-        ? { intent: { original_trade_id: 'EXAMPLE_RELEASED', status: 'released', release_mode: 'not_sent' }, created: false } as never : previous(input));
+        ? { intent: { original_trade_id: 'EXAMPLE_RELEASED', status: 'released', release_mode: 'not_sent', attempt_log: [] }, created: false } as never : previous(input));
       restores.push(() => spy.mockRestore());
     }
     try {
@@ -1027,9 +1032,9 @@ describe('round6 controls', () => {
   it.skipIf(!hasEntryAdmission)('reset clears accepted-entry test state while production guard still protects an invisible fill', async () => {
     setup({ active: true, size: 0 });
     expect(await entryAdmission!.executeSignalBotEntry(routeBot as never, async () => ({ success: true }))).toEqual({ success: true });
-    expect(await entryAdmission!.pauseSignalBotIfFlat(routeBot as never, 'EXAMPLE', routeWallet.agentPublicKey, null, false)).toBe(false);
+    expect(await entryAdmission!.pauseSignalBotIfFlat(routeBot as never, 'EXAMPLE', routeWallet.agentPublicKey, null, false)).toBe('recently_accepted');
     entryAdmission!.resetSignalBotAcceptedEntriesForTests();
-    expect(await entryAdmission!.pauseSignalBotIfFlat(routeBot as never, 'EXAMPLE', routeWallet.agentPublicKey, null, false)).toBe(true);
+    expect(await entryAdmission!.pauseSignalBotIfFlat(routeBot as never, 'EXAMPLE', routeWallet.agentPublicKey, null, false)).toBe('paused');
   });
 });
 
@@ -1118,7 +1123,7 @@ describe.skipIf(!hasEntryAdmission)('round3 pause accepted entry visibility', ()
     expect(await h.venue.getPositionForCloseAuthority()).toEqual({ side: 'FLAT', size: 0 });
     const pause = h.pauseSignalBotIfFlat(routeBot, 'Bot underfunded: EXAMPLE', routeWallet.agentPublicKey, null, false);
     release.resolve(); await entry;
-    expect(await pause).toBe(false); expect(h.port.active).toBe(true);
+    expect(await pause).toBe('recently_accepted'); expect(h.port.active).toBe(true);
     expect(h.storagePort.getBotPosition).toHaveBeenCalledTimes(1);
     expect(h.storagePort.updateTradingBot).not.toHaveBeenCalled();
   });
@@ -1127,18 +1132,18 @@ describe.skipIf(!hasEntryAdmission)('round3 pause accepted entry visibility', ()
     try {
       await h.executeSignalBotEntry(routeBot, async () => ({ success: true }));
       now.mockReturnValue(start + 119_999);
-      expect(await h.pauseSignalBotIfFlat(routeBot, 'EXAMPLE', routeWallet.agentPublicKey, null, false)).toBe(false);
+      expect(await h.pauseSignalBotIfFlat(routeBot, 'EXAMPLE', routeWallet.agentPublicKey, null, false)).toBe('recently_accepted');
       now.mockReturnValue(start + 120_000);
       h.venue.getPositionForCloseAuthority.mockResolvedValueOnce({ side: 'LONG', size: 0.25 });
-      expect(await h.pauseSignalBotIfFlat(routeBot, 'EXAMPLE', routeWallet.agentPublicKey, null, false)).toBe(false);
-      expect(await h.pauseSignalBotIfFlat(routeBot, 'EXAMPLE', routeWallet.agentPublicKey, null, false)).toBe(true);
+      expect(await h.pauseSignalBotIfFlat(routeBot, 'EXAMPLE', routeWallet.agentPublicKey, null, false)).toBe('not_flat');
+      expect(await h.pauseSignalBotIfFlat(routeBot, 'EXAMPLE', routeWallet.agentPublicKey, null, false)).toBe('paused');
       expect(h.storagePort.updateTradingBot).toHaveBeenCalledTimes(1);
     } finally { now.mockRestore(); }
   });
   it('a terminal rejection does not reserve the visibility window', async () => {
     const h = entryPauseHarness();
     await h.executeSignalBotEntry(routeBot, async () => ({ success: false, error: 'EXAMPLE_REJECTED' }));
-    expect(await h.pauseSignalBotIfFlat(routeBot, 'EXAMPLE', routeWallet.agentPublicKey, null, false)).toBe(true);
+    expect(await h.pauseSignalBotIfFlat(routeBot, 'EXAMPLE', routeWallet.agentPublicKey, null, false)).toBe('paused');
   });
 });
 
@@ -1235,8 +1240,8 @@ describe.skipIf(!hasEntryAdmission).each(['manual', 'background'] as const)('rou
     await Promise.resolve(); await Promise.resolve();
     try { expect(h.storagePort.getBotPosition).not.toHaveBeenCalled(); }
     finally { release.resolve(); await entry; await pause; }
-    expect(await pause).toBe(false); expect(h.port.active).toBe(true);
-    expect(await h.pauseSignalBotIfFlat(routeBot, 'EXAMPLE', routeWallet.agentPublicKey, null, false)).toBe(false);
+    expect(await pause).toBe('recently_accepted'); expect(h.port.active).toBe(true);
+    expect(await h.pauseSignalBotIfFlat(routeBot, 'EXAMPLE', routeWallet.agentPublicKey, null, false)).toBe('recently_accepted');
     expect(h.storagePort.updateTradingBot).not.toHaveBeenCalled();
   });
   it('pause first blocks retry and rejects it after the active check', async () => {
@@ -1247,13 +1252,13 @@ describe.skipIf(!hasEntryAdmission).each(['manual', 'background'] as const)('rou
     await Promise.resolve(); await Promise.resolve();
     try { expect(submit).not.toHaveBeenCalled(); }
     finally { release.resolve(); await pause; await entry; }
-    expect(await pause).toBe(true); expect(await entry).toEqual({ success: false, error: 'Bot is paused' });
+    expect(await pause).toBe('paused'); expect(await entry).toEqual({ success: false, error: 'Bot is paused' });
     expect(submit).not.toHaveBeenCalled();
   });
   it.each([false, true])('accepted or unconfirmed retry keeps the invisible-fill marker (%s)', async unconfirmed => {
     const h = entryPauseHarness();
     await retrySubmission(path, h, async () => ({ success: !unconfirmed, submissionUnconfirmed: unconfirmed }))();
-    expect(await h.pauseSignalBotIfFlat(routeBot, 'EXAMPLE', routeWallet.agentPublicKey, null, false)).toBe(false);
+    expect(await h.pauseSignalBotIfFlat(routeBot, 'EXAMPLE', routeWallet.agentPublicKey, null, false)).toBe('recently_accepted');
     expect(h.storagePort.updateTradingBot).not.toHaveBeenCalled();
   });
 });
@@ -1285,7 +1290,7 @@ describe.skipIf(!hasEntryAdmission)('round9 helper account authority', () => {
     expect(await routeMocks.adapter.getStrictPositionForMarket(mainAccount)).toBeNull();
     routeMocks.adapter.getStrictPositionForMarket.mockClear();
 
-    expect(await entryAdmission!.pauseSignalBotIfFlat(source as never, 'EXAMPLE', mainAccount, null, false)).toBe(size === 0);
+    expect(await entryAdmission!.pauseSignalBotIfFlat(source as never, 'EXAMPLE', mainAccount, null, false)).toBe(size === 0 ? 'paused' : 'not_flat');
     expect(routeMocks.adapter.getStrictPositionForMarket).toHaveBeenCalledTimes(1);
     expect(routeMocks.adapter.getStrictPositionForMarket).toHaveBeenCalledWith(source.protocolSubaccountId, source.market, undefined);
     if (size === 0) {
@@ -1318,7 +1323,7 @@ describe.skipIf(!hasEntryAdmission)('round8 discriminating queued entry authorit
       if (gate === 'disabled') wallet.executionEnabled = false;
       if (gate === 'expired') now.mockReturnValue(start + 60_001);
       release.resolve();
-      expect(await pause).toBe(false);
+      expect(await pause).toBe('not_flat');
       expect(await queued).toMatchObject({ success: false, error: expect.stringMatching(gate === 'emergency-stop' ? /Emergency stop/ : gate === 'disabled' ? /disabled/ : /expired/) });
       expect(storage.getWallet).toHaveBeenCalledWith(source.walletAddress);
       expect(submit).not.toHaveBeenCalled();

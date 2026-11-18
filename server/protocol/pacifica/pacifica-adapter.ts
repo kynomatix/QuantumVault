@@ -1644,13 +1644,31 @@ export class PacificaAdapter implements ProtocolAdapter {
     } catch (error) { return classifyCloseFetchFailure(error); }
     finally { pacificaQuota.record(path); }
     // HTTP status, including 429 and every 4xx, never proves non-entry.
-    if (!response.ok) return { kind: 'ambiguous', httpStatus: response.status, cause: 'close_http_unresolved' };
+    if (!response.ok) {
+      const authRejection = response.status === 401 || response.status === 403;
+      const terminalNonAuth = [400, 404, 405, 422].includes(response.status);
+      if (!authRejection && !terminalNonAuth) {
+        return { kind: 'ambiguous', httpStatus: response.status, cause: 'close_http_unresolved' };
+      }
+      // The market-order policy treats these statuses as terminal non-auth
+      // rejections. This proves signing only; close landing stays ambiguous.
+      let bodyReadable = false;
+      try {
+        await this.readBodyBounded(response.text(), 5_000, 'admitted close error body');
+        bodyReadable = true;
+      } catch { /* An unreadable body supplies no signing evidence. */ }
+      const signingProof = bodyReadable && terminalNonAuth
+        ? 'terminal_non_auth_rejection' as const : undefined;
+      return { kind: 'ambiguous', httpStatus: response.status, cause: 'close_http_unresolved',
+        venue: 'pacifica', signingProof,
+        keyFailureKind: bodyReadable && authRejection ? 'venue_auth_rejected' : undefined };
+    }
     try {
       const envelope = await this.readBodyBounded(response.json(), 5_000, 'admitted close body');
       const result = this.mapOrderResponse(this.unwrapEnvelope(envelope), prepared.operationData.client_order_id);
-      if (result.success && result.orderId) return { kind: 'acknowledged', orderId: result.orderId, httpStatus: response.status };
-      return { kind: 'ambiguous', httpStatus: response.status, cause: 'close_response_unresolved' };
-    } catch { return { kind: 'ambiguous', httpStatus: response.status, cause: 'close_body_unresolved' }; }
+      if (result.success && result.orderId) return { kind: 'acknowledged', orderId: result.orderId, httpStatus: response.status, venue: 'pacifica' };
+      return { kind: 'ambiguous', httpStatus: response.status, venue: 'pacifica', cause: 'close_response_unresolved' };
+    } catch { return { kind: 'ambiguous', httpStatus: response.status, venue: 'pacifica', cause: 'close_body_unresolved' }; }
   }
 
   async getCloseOpenOrders(account: string): Promise<StrictCloseOpenOrders> {
@@ -5064,9 +5082,13 @@ export class PacificaAdapter implements ProtocolAdapter {
         // so the existing bounded approval retry loop can observe it.
         const terminalStatus = PACIFICA_POST_TERMINAL_STATUSES.has(response.status);
         if (terminalStatus || !policy.mutatesVenue) {
-          throw new Error(
+          const error = new Error(
             `PacificaAdapter POST ${path}: ${response.status} ${response.statusText} — ${errorBody}`,
           );
+          if (response.status === 401 || response.status === 403) {
+            Object.assign(error, { venue: 'pacifica', httpStatus: response.status, keyFailureKind: 'venue_auth_rejected' });
+          }
+          throw error;
         }
         throw ambiguous(`HTTP ${response.status} did not prove rejection: ${errorBody || response.statusText}`);
       }
@@ -5121,8 +5143,10 @@ export class PacificaAdapter implements ProtocolAdapter {
       if (!response.ok) {
         const terminalStatus = new Set([400, 401, 403, 404, 405, 422]).has(response.status);
         let detail = '';
+        let bodyReadable = false;
         try {
           detail = await this.readBodyBounded(response.text(), 10_000, `POST ${path}`);
+          bodyReadable = true;
         } catch {
           detail = '';
         }
@@ -5132,6 +5156,10 @@ export class PacificaAdapter implements ProtocolAdapter {
             clientOrderId,
             status: 'rejected',
             error: `PacificaAdapter POST ${path}: ${response.status} ${response.statusText} — ${detail}`,
+            venue: 'pacifica',
+            httpStatus: response.status,
+            keyFailureKind: bodyReadable && (response.status === 401 || response.status === 403) ? 'venue_auth_rejected' : undefined,
+            signingKeyUsed: bodyReadable ? undefined : false,
             landingDisposition: 'terminal',
           };
         }
