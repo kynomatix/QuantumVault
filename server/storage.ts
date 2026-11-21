@@ -1,3 +1,4 @@
+import { isVenueOrderId, sameVenueOrderId } from './protocol/venue-order-id';
 import { closeIntentStore } from './trading/close-intent-store';
 import { drizzle as closeIntentDrizzle } from 'drizzle-orm/node-postgres';
 import { AGENT_WALLET_RESET_LOCK_NAMESPACE } from "./wallet-lock-constants";
@@ -3091,7 +3092,10 @@ export class DatabaseStorage implements IStorage {
     const exact = a.reason === null && a.pnl !== null && a.fee !== null
       && a.size !== null && a.price !== null && a.volume !== null && a.fillIds.length > 0;
     const deferred = a.reason !== null && a.pnl === null && a.recovery?.closeResult?.outcome === "confirmed"
-      && a.recovery.account === a.account && a.recovery.market === a.market && a.recovery.orderId === a.orderId;
+      && a.recovery.account === a.account && a.recovery.market === a.market
+      && !!a.recovery.orderId && (sameVenueOrderId(a.recovery.orderId, a.orderId)
+        // Preserve the quiet deferred result. The locked-row comparison below rejects invalid IDs.
+        || (a.reason === "invalid_close_identity" && !isVenueOrderId(a.orderId) && a.recovery.orderId === a.orderId));
     if (a.outcome !== "confirmed" || !a.orderId || (!exact && !deferred)) {
       throw new Error("subscriber repair requires exact confirmed evidence or its durable recovery request");
     }
@@ -3111,8 +3115,8 @@ export class DatabaseStorage implements IStorage {
       const prior = payload.subscriberCloseAccounting as SubscriberCloseAccounting | undefined;
       const attributable = locked.market === a.market && locked.side === "CLOSE"
         && ["executed", "recovered", "liquidated"].includes(locked.status)
-        && (prior ? prior.account === a.account && prior.orderId === a.orderId
-          : locked.txSignature === a.orderId);
+        && (prior ? prior.account === a.account && !!prior.orderId && sameVenueOrderId(prior.orderId, a.orderId)
+          : sameVenueOrderId(locked.txSignature, a.orderId));
       // An unrelated reconciler winner is not permission to attach this order.
       if (!attributable) return { trade: locked, remediated: false };
       if (locked.pnl !== null) {

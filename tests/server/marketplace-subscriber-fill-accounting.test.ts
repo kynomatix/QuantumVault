@@ -134,7 +134,7 @@ const routeBot = {
 };
 
 
-import { subscriberCloseAccounting, subscriberClosePersistence, type SubscriberCloseEvidenceInput } from '../../server/trading/subscriber-close-accounting';
+import { readSubscriberCloseAccounting, subscriberCloseAccounting, subscriberClosePersistence, type SubscriberCloseEvidenceInput } from '../../server/trading/subscriber-close-accounting';
 import { resolveBotTradeNetPnl } from '../../server/trading/bot-trade-pnl-convention';
 import type { CloseSnapshot } from '../../server/protocol/close-outcome';
 import type { TradeRecord } from '../../server/protocol/protocol-types';
@@ -150,12 +150,12 @@ function snapshot(account: string, sequence: number, size: number): CloseSnapsho
       dispatchedAt: now, receivedAt: now, lastOrderId: sequence, complete: true, fresh: true, noDedup: true } };
 }
 function fill(overrides: Partial<TradeRecord> = {}): TradeRecord {
-  return { tradeId: 'EXAMPLE_FILL', orderId: 'EXAMPLE_ORDER', internalSymbol: 'BTC-PERP',
+  return { tradeId: 'EXAMPLE_FILL', orderId: '17', internalSymbol: 'BTC-PERP',
     side: 'short', price: 65000, size: 0.25, fee: 1, timestamp: Date.now(), ...overrides };
 }
 function evidence(): SubscriberCloseEvidenceInput {
   const baseline = snapshot('EXAMPLE_ACCOUNT', 1, 0.25);
-  return { account: 'EXAMPLE_ACCOUNT', market: 'BTC-PERP', orderId: 'EXAMPLE_ORDER', openSide: 'long',
+  return { account: 'EXAMPLE_ACCOUNT', market: 'BTC-PERP', orderId: '17', openSide: 'long',
     requestedSize: 0.25, sentAt: Date.now() - 100, observedAt: Date.now() + 100,
     baseline, closeResult: { outcome: 'confirmed', account: 'EXAMPLE_ACCOUNT', market: 'BTC-PERP',
       reason: 'qualified_flat_observation', baseline: baseline.evidence }, trades: [fill()] };
@@ -184,7 +184,7 @@ function prime(side: 'long' | 'short' = 'long', rows: () => TradeRecord[] = () =
   routeMocks.adapter.getStrictPositionForMarket.mockResolvedValue({ internalSymbol: 'BTC-PERP', baseSize: sign * 0.25, entryPrice: 64000 });
   routeMocks.adapter.getPositions.mockResolvedValue([{ internalSymbol: 'BTC-PERP', baseSize: sign * 0.25, entryPrice: 64000 }]);
   routeMocks.adapter.getTradeHistory.mockImplementation(async () => rows());
-  routeMocks.adapter.placeMarketOrder.mockResolvedValue({ success: true, status: 'filled', orderId: 'EXAMPLE_ORDER', landingDisposition: 'terminal' });
+  routeMocks.adapter.placeMarketOrder.mockResolvedValue({ success: true, status: 'filled', orderId: '17', landingDisposition: 'terminal' });
   let seq = 0;
   routeMocks.adapter.getCloseConfirmationSnapshot.mockImplementation(async (account: string) => snapshot(account, ++seq, !routeMocks.adapter.placeMarketOrder.mock.calls.length ? sign * 0.25 : 0));
 }
@@ -201,7 +201,7 @@ describe('subscriber execution accounting through the routing seam', () => {
     expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledOnce();
     const event = vi.mocked(storage.recordCloseEventAtomic).mock.calls[0]?.[0];
     expect(event?.update?.fields, JSON.stringify({size:event?.update?.fields.size,price:event?.update?.fields.price,pnl:event?.update?.fields.pnl,fee:event?.update?.fields.fee,payload:event?.update?.fields.webhookPayload})).toMatchObject({ size: '0.25', price: side === 'long' ? '65000' : '63000',
-      pnl: '249', fee: '1', protocolFillId: 'tx-EXAMPLE_ORDER' });
+      pnl: '249', fee: '1', protocolFillId: 'tx-17' });
     expect(event?.deltas?.totalPnlDelta).toBe(249);
     expect(event?.deltas?.totalVolumeDelta).toBe(side === 'long' ? 16250 : 15750);
     expect(storage.getBotSubscriptionBySubscriberBotId).toHaveBeenCalledOnce();
@@ -284,7 +284,7 @@ describe('subscriber execution accounting through the routing seam', () => {
   });
   it('cannot substitute an estimated submit fee for missing fill fees', async () => {
     prime('long', () => [fill({ fee: NaN })]);
-    routeMocks.adapter.placeMarketOrder.mockResolvedValue({ success: true, orderId: 'EXAMPLE_ORDER', fee: 0 });
+    routeMocks.adapter.placeMarketOrder.mockResolvedValue({ success: true, orderId: '17', fee: 0 });
     routeMocks.adapter.getFeeRateQuote.mockResolvedValue({ kind: 'rate_estimate', rate: 0.0005 });
     await route();
     expect(vi.mocked(storage.recordCloseEventAtomic).mock.calls[0]?.[0].update?.fields)
@@ -310,6 +310,57 @@ describe('subscriber execution accounting through the routing seam', () => {
 });
 
 describe('subscriber evidence validation', () => {
+  it.each([
+    [0, '0'], ['17,17', '17,17'], [' 17 ', ' 17 '], [1, '01'], [1, '1.0'], [1, '1e0'], [1, ' 1 '], [17, '18'],
+    [Number.MAX_SAFE_INTEGER + 1, String(Number.MAX_SAFE_INTEGER + 1)],
+    ['', ''], [undefined, undefined], [null, null], [false, false], [{}, {}], [-1, '-1'], [1.5, '1.5'],
+  ])('ACCT-01 rejects ambiguous or different IDs %j and %j', (ack, history) => {
+    const result = subscriberCloseAccounting({ ...evidence(), orderId: ack as string,
+      trades: [fill({ orderId: history as string })] });
+    expect(result.fillIds).toEqual([]);
+    expect(result.pnl).toBeNull();
+  });
+  it('ACCT-01 subscriber prices numeric acknowledgments from their weighted string-ID fills', () => {
+    const input = evidence();
+    const result = subscriberCloseAccounting({ ...input, orderId: 17, trades: [
+      fill({ orderId: '17', tradeId: 'EXAMPLE_A', price: 65000, size: 0.1, fee: 0.25 }),
+      fill({ orderId: '17', tradeId: 'EXAMPLE_B', price: 66000, size: 0.15, fee: 0.75 }),
+    ] });
+    expect(result).toMatchObject({ price: '65600', fee: '1', pnl: '399', volume: '16400', reason: null });
+  });
+  it.each([0, ' 17 ', '17,17'])('ACCT-01 skips history for invalid subscriber acknowledgment %j', async orderId => {
+    const getTradeHistory = vi.fn();
+    const result = await readSubscriberCloseAccounting({ protocolName: 'pacifica', getTradeHistory } as unknown as ProtocolAdapter,
+      { ...evidence(), orderId });
+    expect(result).toMatchObject({ reason: 'invalid_close_identity', orderId, pnl: null, fillIds: [] });
+    expect(getTradeHistory).not.toHaveBeenCalled();
+  });
+  it('ACCT-01 propagates a subscriber clock failure before reading history', async () => {
+    const getTradeHistory = vi.fn();
+    const adapter = { protocolName: 'pacifica', getTradeHistory } as unknown as ProtocolAdapter;
+    const request = { ...evidence(), orderId: 17 };
+    const failure = new Error('EXAMPLE clock unavailable');
+    const clock = vi.spyOn(Date, 'now').mockImplementationOnce(() => { throw failure; });
+    try {
+      await expect(readSubscriberCloseAccounting(adapter, request)).rejects.toBe(failure);
+      expect(getTradeHistory).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); }
+  });
+  it('ACCT-01 preserves an invalid request reason when the history read fails', async () => {
+    const getTradeHistory = vi.fn().mockRejectedValue(new Error('EXAMPLE timeout'));
+    const result = await readSubscriberCloseAccounting({ protocolName: 'pacifica', getTradeHistory } as unknown as ProtocolAdapter,
+      { ...evidence(), orderId: 17, requestedSize: 0 });
+    expect(getTradeHistory).toHaveBeenCalledOnce();
+    expect(result.reason).toBe('invalid_close_identity');
+  });
+  it('ACCT-01 subscriber distinguishes failed history from an empty successful read', async () => {
+    const adapter = { protocolName: 'pacifica', getTradeHistory: vi.fn().mockRejectedValueOnce(new Error('EXAMPLE')).mockResolvedValue([]) } as unknown as ProtocolAdapter;
+    const request = { ...evidence(), orderId: 17 };
+    for (const reason of ['history_read_failed', 'attributable_close_fills_unavailable']) {
+      const result = subscriberClosePersistence(await readSubscriberCloseAccounting(adapter, request));
+      expect(result.webhookPayload.closeAccounting).toMatchObject({ kind: 'unavailable', reason });
+    }
+  });
   it('attaches delayed partial fills to the same restart marker without ordering or paying', async () => {
     const request = evidence();
     request.requestedSize = 0.125;
@@ -320,7 +371,7 @@ describe('subscriber evidence validation', () => {
       partialCloseAccounting: { status: 'pending_venue_authority', expectedBaseSize: '0.25',
         expectedLastTradeId: 'EXAMPLE_ENTRY', requestedClosedSize: 0.125 } };
     const trade = { id: 'EXAMPLE_PENDING', status: 'pending', market: 'BTC-PERP', side: 'short',
-      txSignature: 'EXAMPLE_ORDER', protocolFillId: 'tx-EXAMPLE_ORDER', executedAt: new Date(), webhookPayload: payload };
+      txSignature: '17', protocolFillId: 'tx-17', executedAt: new Date(), webhookPayload: payload };
     const updatePendingBotTrade = vi.fn();
     const remediateSubscriberCloseAccountingAtomic = vi.fn();
     const placeMarketOrder = vi.fn();

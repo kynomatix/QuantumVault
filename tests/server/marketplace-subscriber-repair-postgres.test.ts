@@ -1,4 +1,5 @@
 ﻿import { beforeAll, afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { pacificaCloseHistory } from '../helpers/pacifica-close-history';
 import { Client } from 'pg';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { getTableConfig } from 'drizzle-orm/pg-core';
@@ -27,10 +28,11 @@ describe('subscriber later evidence repair with real Drizzle/node-postgres', () 
   let client: Client;
   const store = new DatabaseStorage();
   const accounting: SubscriberCloseAccounting = { version: 1, account: 'EXAMPLE_ACCOUNT', market: 'BTC-PERP',
-    orderId: 'EXAMPLE_ORDER', outcome: 'confirmed', size: '0.25', price: '65000', fee: '1', pnl: '249',
+    orderId: '17', outcome: 'confirmed', size: '0.25', price: '65000', fee: '1', pnl: '249',
     volume: '16250', entryPrice: '64000', fillIds: ['EXAMPLE_FILL'], timestamp: 1, reason: null,
     pnlConvention: 'net_of_close_fee' };
   beforeAll(async () => {
+    if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required for subscriber repair tests');
     client = new Client({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 5000 });
     await client.connect();
     holder.db = drizzle(client);
@@ -50,7 +52,7 @@ describe('subscriber later evidence repair with real Drizzle/node-postgres', () 
     await client.query(`INSERT INTO pg_temp.bot_trades
       (id, trading_bot_id, market, side, size, price, pnl, fee, status, tx_signature, protocol_fill_id, pnl_convention, webhook_payload)
       VALUES ('EXAMPLE_CLOSE', 'EXAMPLE_BOT', 'BTC-PERP', 'CLOSE', 0, 0, NULL, NULL, 'recovered',
-      'EXAMPLE_ORDER', 'tx-EXAMPLE_RECONCILER', 'net_of_close_fee', $1::jsonb)`,
+      '17', 'tx-EXAMPLE_RECONCILER', 'net_of_close_fee', $1::jsonb)`,
       [JSON.stringify({ closeAccounting: { kind: 'unavailable', reason: 'missing_history' } })]);
   });
   it('looks up active subscriptions by source identity regardless of publication or subscriber pause', async () => {
@@ -122,7 +124,11 @@ describe('subscriber later evidence repair with real Drizzle/node-postgres', () 
     await repair();
     await expect(repair({ ...accounting, pnl: '250' })).rejects.toThrow('conflicting exact');
   });
-  it('discovers delayed evidence durably and repairs the canonical row exactly once after restart', async () => {
+  it.each([
+    { rawOrderId: '17', historyId: 17 }, { rawOrderId: 17, historyId: 17 }, { rawOrderId: '17', historyId: '17' },
+  ])('ACCT-01 preserves legacy repair admission after restart (ack=$rawOrderId, raw history=$historyId)', async ({ rawOrderId, historyId }) => {
+    const textOrderId = String(rawOrderId);
+    await client.query('UPDATE pg_temp.bot_trades SET tx_signature=$1', [textOrderId]);
     const now = Date.now();
     const baseline: CloseSnapshot = { positions: [{ internalSymbol: 'BTC-PERP', baseSize: 0.25,
       entryPrice: 64000, markPrice: null, unrealizedPnl: null, leverage: 2, liquidationPrice: null, marginMode: 'cross' }],
@@ -130,22 +136,38 @@ describe('subscriber later evidence repair with real Drizzle/node-postgres', () 
         startedAt: now - 200, dispatchedAt: now - 200, receivedAt: now - 100, lastOrderId: 1,
         complete: true, fresh: true, noDedup: true } };
     const pending = subscriberCloseAccounting({ account: 'EXAMPLE_ACCOUNT', market: 'BTC-PERP',
-      orderId: 'EXAMPLE_ORDER', openSide: 'long', requestedSize: 0.25, sentAt: now - 100, observedAt: now,
+      orderId: rawOrderId, openSide: 'long', requestedSize: 0.25, sentAt: now - 100, observedAt: now,
       baseline, closeResult: { outcome: 'confirmed', account: 'EXAMPLE_ACCOUNT', market: 'BTC-PERP',
         baseline: baseline.evidence, reason: 'qualified_flat_observation' }, trades: [] });
-    // The reconciler won first; the submitting route attaches its durable
-    // strict outcome to that same row while fills are still delayed.
-    expect((await repair(pending)).remediated).toBe(false);
-    expect((await store.getSubscriberCloseAccountingCandidates('EXAMPLE_BOT')).length).toBe(1);
+    if (typeof rawOrderId === 'number') {
+      // Seed historical JSON directly so this exercises only the restart reader.
+      await client.query("UPDATE pg_temp.bot_trades SET webhook_payload=jsonb_set(webhook_payload,'{subscriberCloseAccounting}',$1::jsonb)",
+        [JSON.stringify({ ...pending, orderId: rawOrderId })]);
+    } else {
+      expect((await repair(pending)).remediated).toBe(false);
+    }
+    expect(await store.getSubscriberCloseAccountingCandidates('EXAMPLE_BOT')).toHaveLength(1);
     const placeMarketOrder = vi.fn();
-    const getTradeHistory = vi.fn().mockResolvedValueOnce([]).mockResolvedValue([{
-      tradeId: 'EXAMPLE_FILL', orderId: 'EXAMPLE_ORDER', internalSymbol: 'BTC-PERP', side: 'short',
-      price: 65000, size: 0.25, fee: 1, timestamp: now,
-    }]);
-    const adapter = { protocolName: 'pacifica', getTradeHistory, placeMarketOrder } as unknown as ProtocolAdapter;
+    const history = pacificaCloseHistory({ symbol: 'BTC', orderId: historyId, amount: '0.25', price: '65000',
+      entryPrice: '64000', fee: '1', pnl: '250', timestamp: now });
+    history.transport.mockResolvedValueOnce({ success: true, data: [], has_more: false, next_cursor: null });
+    const adapter = { protocolName: 'pacifica', getTradeHistory: history.getTradeHistory, placeMarketOrder } as unknown as ProtocolAdapter;
     const recover = () => recoverSubscriberCloseEvidence({ botId: 'EXAMPLE_BOT', account: 'EXAMPLE_ACCOUNT',
       adapter, storage: new DatabaseStorage() });
     expect(await recover()).toBe(0);
+    if (typeof rawOrderId === 'number' || typeof historyId === 'string') {
+      expect(await recover()).toBe(0);
+      expect(history.transport).toHaveBeenCalledTimes(typeof rawOrderId === 'number' ? 0 : 2);
+      expect(await store.getSubscriberCloseAccountingCandidates('EXAMPLE_BOT')).toHaveLength(1);
+      const { rows: [trade] } = await client.query('SELECT pnl,fee,webhook_payload FROM pg_temp.bot_trades');
+      expect(trade).toMatchObject({ pnl: null, fee: null });
+      expect(trade.webhook_payload).not.toHaveProperty('subscriberShareEligibility');
+      const position = (await client.query('SELECT realized_pnl,total_fees FROM pg_temp.bot_positions')).rows[0];
+      expect(Number(position.realized_pnl)).toBe(4);
+      expect(Number(position.total_fees)).toBe(1);
+      expect(placeMarketOrder).not.toHaveBeenCalled();
+      return;
+    }
     expect(await recover()).toBe(1);
     expect(await recover()).toBe(0);
     expect(await store.getSubscriberCloseAccountingCandidates('EXAMPLE_BOT')).toEqual([]);
@@ -160,10 +182,38 @@ describe('subscriber later evidence repair with real Drizzle/node-postgres', () 
     expect(Number(position.base_size)).toBe(3);
     expect(placeMarketOrder).not.toHaveBeenCalled();
   });
+  it('ACCT-01 atomic repair matches admissible numeric evidence to a signed decimal ID', async () => {
+    expect((await repair({ ...accounting, orderId: 17 })).remediated).toBe(true);
+    expect((await repair({ ...accounting, orderId: 17 })).remediated).toBe(false);
+  });
+  it('ACCT-01 rejects numeric zero evidence for a row signed with string zero', async () => {
+    await client.query("UPDATE pg_temp.bot_trades SET tx_signature='0'");
+    await expect(repair({ ...accounting, orderId: 0 })).rejects.toThrow('exact confirmed');
+    expect((await client.query('SELECT pnl,fee FROM pg_temp.bot_trades')).rows[0]).toEqual({ pnl: null, fee: null });
+  });
   it('does not attach an unrelated order to a fuzzy reconciler winner', async () => {
-    expect((await repair({ ...accounting, orderId: 'EXAMPLE_OTHER' })).remediated).toBe(false);
+    expect((await repair({ ...accounting, orderId: '18' })).remediated).toBe(false);
     const { rows: [trade] } = await client.query('SELECT pnl FROM pg_temp.bot_trades');
     expect(trade.pnl).toBeNull();
+  });
+  it('ACCT-01 distinguishes invalid deferred identity from conflicting valid recovery evidence', async () => {
+    const request = { account: accounting.account, market: accounting.market, openSide: 'long' as const,
+      requestedSize: 0.25, sentAt: 1, observedAt: 2, trades: [],
+      closeResult: { account: accounting.account, market: accounting.market, outcome: 'confirmed' as const, reason: 'flat' } };
+    const invalid = subscriberCloseAccounting({ ...request, orderId: ' 17 ' });
+    expect(invalid).toMatchObject({ orderId: ' 17 ', reason: 'invalid_close_identity' });
+    expect((await repair(invalid)).remediated).toBe(false);
+    await expect(repair({ ...invalid, recovery: { ...invalid.recovery!, orderId: ' 18 ' } })).rejects.toThrow('exact confirmed');
+    const pending = subscriberCloseAccounting({ ...request, orderId: 17 });
+    await expect(repair({ ...pending, recovery: { ...pending.recovery!, orderId: '18' } })).rejects.toThrow('exact confirmed');
+    let trade = (await client.query('SELECT webhook_payload,pnl,fee FROM pg_temp.bot_trades')).rows[0];
+    expect(trade.webhook_payload).not.toHaveProperty('subscriberCloseAccounting');
+    expect(trade).toMatchObject({ pnl: null, fee: null });
+    expect((await repair(pending)).remediated).toBe(false);
+    expect((await repair({ ...accounting, orderId: '18' })).remediated).toBe(false);
+    trade = (await client.query('SELECT webhook_payload,pnl,fee FROM pg_temp.bot_trades')).rows[0];
+    expect(trade.webhook_payload.subscriberCloseAccounting.orderId).toBe('17');
+    expect(trade).toMatchObject({ pnl: null, fee: null });
   });
   it('rejects partial accounting and rolls back a repair if the owning position is absent', async () => {
     await expect(repair({ ...accounting, outcome: 'partial' })).rejects.toThrow('exact confirmed');

@@ -14,6 +14,7 @@
 // pauses, stale-context reschedule, happy-path execution), and startup
 // reconciliation (paper reset, live flat reset, bracket completion, orphan
 // position fail-closed flatten, venue-read-failure retry signal).
+import { pacificaCloseHistory } from '../helpers/pacifica-close-history';
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 const preflightMarketEntriesMock = vi.hoisted(() => vi.fn());
 vi.mock('../../server/ai-trader/market-entry-cooldown', () => ({ preflightMarketEntries: preflightMarketEntriesMock }));
@@ -1783,6 +1784,22 @@ describe("live close-result consumption", () => {
 });
 
 describe("live close detection", () => {
+  it.each([{ orderId: '17', cancels: 0 }, { orderId: 17, cancels: 1 }])(
+    'ACCT-01 preserves survivor cancellation for raw history order $orderId (cancels=$cancels)', async ({ orderId, cancels }) => {
+      const { monitorBotOnce } = await importMonitor();
+      armLiveAuth();
+      const history = pacificaCloseHistory({ symbol: 'SOL', orderId, amount: '2', price: '145.02',
+        entryPrice: '150', fee: '0.12', pnl: '-9.96', timestamp: NOW - 60_000 });
+      const adapter = makeAdapter({ getPositions: vi.fn(async () => []), getTradeHistory: history.getTradeHistory });
+      getAdapterMock.mockReturnValue(adapter);
+      getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+      await monitorBotOnce(makeBot({ paperMode: false }));
+      expect(history.transport).toHaveBeenCalledOnce();
+      expect(adapter.cancelTpSlOrders).toHaveBeenCalledTimes(cancels);
+      expect(decisionUpdates().filter(update => update.exitReason)).toHaveLength(cancels);
+    },
+  );
+
   it("survivor cancel executes while every journal append fails", async () => {
     const { monitorBotOnce } = await importMonitor();
     armLiveAuth();

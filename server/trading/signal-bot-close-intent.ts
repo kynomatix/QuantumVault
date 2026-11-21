@@ -214,6 +214,7 @@ export async function confirmDurableClose(scope: CloseScope, intent: CloseIntent
   const subscriberPartial = intent.close_kind === 'partial' && intent.authority_ref.subscriberAccounting === true;
   const settled = await store.settle(scope, intent, { status: 'confirmed', completed_at: new Date(await store.databaseTime(scope)),
     last_error_code: null, last_evidence: { ...intent.last_evidence, accountingPending: !fill || fill.realizedPnl === null, notificationPending: !subscriberPartial, ...(intent.close_kind === 'partial' ? { effectsPending: !subscriberPartial } : {}), fill, subscriberAccounting: evidence.accounting, closeResult: evidence.closeResult } },
-    client => account(client, intent, 'confirmed', fill));
+    client => account(client, intent, 'confirmed', fill,
+      evidence.accounting.reason === 'history_read_failed' ? 'history_read_failed' : 'venue_fill_unattributed'));
   return settled;
 }

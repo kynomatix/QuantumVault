@@ -1,3 +1,5 @@
+import { PacificaAdapter } from '../../server/protocol/pacifica/pacifica-adapter';
+import { SymbolRegistry } from '../../server/protocol/symbol-registry';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -34,6 +36,11 @@ vi.mock('../../server/storage', () => ({
     canonicalCloseFillId: mocks.canonicalCloseFillId,
   },
 }));
+
+vi.mock('../../server/trading/close-intent-store', async () => {
+  const { makeLifecycleFenceFixture } = await import('../helpers/close-lifecycle-fence');
+  return { closeIntentStore: makeLifecycleFenceFixture() };
+});
 
 vi.mock('../../server/protocol/adapter-registry', () => ({
   getDefaultAdapter: vi.fn(() => mocks.adapter),
@@ -178,6 +185,64 @@ describe('public reconciler requires qualified flatness', () => {
       update: { tradeId: 'EXAMPLE_PENDING', fields: { status: 'executed', fee: null, pnl: null } },
       confirmedPositionCloseIncomplete: { walletAddress, market },
     });
+  });
+  // Exercise the venue parser and both downstream money writers with a real envelope.
+  it.each([
+    { partial: false, orderId: '17,17', matches: false },
+    // A rounded numeric acknowledgment persisted as text must not acquire a string-ID history fill.
+    { partial: false, orderId: String(Number.MAX_SAFE_INTEGER + 1), signature: String(Number.MAX_SAFE_INTEGER + 1), matches: false },
+    { partial: false, orderId: 17, matches: true },
+    { partial: true, orderId: ' 17 ', matches: false },
+    { partial: true, orderId: 17, matches: true },
+  ])('ACCT-01 reconciles raw order $orderId (partial=$partial)', async ({ partial, orderId, signature = '17', matches }) => {
+    const adapter = new PacificaAdapter({ baseUrl: 'http://test-pacifica.invalid' });
+    (adapter as any).registry = new SymbolRegistry([{ internal: market, protocol: 'BTC', aliases: [] }]);
+    (adapter as any).initialized = true;
+    const now = Date.now();
+    const envelope = { success: true, has_more: false, next_cursor: null, data: [{
+      history_id: 901, order_id: orderId, symbol: 'BTC', amount: partial ? '0.02' : '1',
+      price: '101', entry_price: '100', fee: '0.01', pnl: '1', event_type: 'fulfill_taker',
+      side: 'close_long', cause: 'normal', created_at: now,
+    }] };
+    const transport = vi.spyOn(adapter as any, 'get').mockResolvedValue(envelope);
+    mocks.adapter.getTradeHistory.mockImplementation(adapter.getTradeHistory.bind(adapter));
+    mocks.storage.getBotPosition.mockResolvedValue({ ...storedPosition('entry-epoch-one'), baseSize: '1', avgEntryPrice: '100' });
+    const pending = { id: 'EXAMPLE_PENDING', status: 'pending', market, executedAt: new Date(now - 1000), txSignature: signature };
+    mocks.storage.getBotTrades.mockResolvedValue([partial ? pendingPartialMarker(pending) : { ...pending, side: 'CLOSE' }]);
+    let sequence = 0;
+    mocks.adapter.getCloseConfirmationSnapshot.mockImplementation(async (account: string) => {
+      const at = Date.now();
+      return { positions: partial ? [{ internalSymbol: market, baseSize: 0.98, entryPrice: 100 }] : [],
+        evidence: { account, environment: 'EXAMPLE', requestId: `EXAMPLE-${++sequence}`, startedAt: at,
+          dispatchedAt: at, receivedAt: at, lastOrderId: sequence, fresh: true, complete: true, noDedup: true } };
+    });
+    registerRecoveredCloseRoutingCallback(mocks.recoveredRoute);
+    try {
+      await reconcile('EXAMPLE_' + String(orderId) + partial);
+      expect(transport).toHaveBeenCalled();
+      if (partial && !matches) {
+        expect(mocks.storage.updateBotTrade).toHaveBeenCalledWith(pending.id, expect.objectContaining({
+          webhookPayload: expect.objectContaining({ partialCloseAuthorityOutcome: expect.objectContaining({
+            incompleteReason: 'pending_partial_marker_identity_or_money_unavailable',
+          }) }),
+        }));
+        expect(mocks.storage.recordCloseEventAtomic).not.toHaveBeenCalled();
+        expect(mocks.recoveredRoute).not.toHaveBeenCalled();
+      } else {
+        expect(mocks.storage.recordCloseEventAtomic).toHaveBeenCalledOnce();
+        const event = mocks.storage.recordCloseEventAtomic.mock.calls[0][0];
+        expect(event.update.tradeId).toBe(pending.id);
+        if (matches) {
+          expect(event).toHaveProperty(partial ? 'confirmedPositionReduction' : 'confirmedPositionClose');
+          expect(Number(event.update.fields.fee)).toBeGreaterThan(0);
+          if (partial) expect(mocks.recoveredRoute).toHaveBeenCalledOnce();
+        } else {
+          expect(event).toHaveProperty('confirmedPositionCloseIncomplete');
+          expect(event.update.fields).toMatchObject({ pnl: null, fee: null });
+          expect(event.deltas).not.toHaveProperty('totalPnlDelta');
+        }
+      }
+    } finally { registerRecoveredCloseRoutingCallback(async () => {}); }
   });
   it.each(['unavailable', 'wrong-account', 'residual', 'second-read-failed'])('low equity cannot substitute for %s inventory', async defect => {
     let sequence = 0;

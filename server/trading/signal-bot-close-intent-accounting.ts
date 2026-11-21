@@ -1,3 +1,4 @@
+import { isVenueOrderId, sameVenueOrderId } from '../protocol/venue-order-id';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { and, eq } from 'drizzle-orm';
 import { botTrades, botPositions, botSubscriptions, publishedBots, pendingProfitShares } from '@shared/schema';
@@ -15,10 +16,16 @@ export async function readIntentFillEvidence(scope: CloseScope, adapter: Protoco
   const attempt = intent.attempt_log[intent.attempt_log.length - 1];
   const orderId = attempt?.outcome?.kind === 'acknowledged' ? attempt.outcome.orderId : undefined;
   let trades: import('../protocol/protocol-types').TradeRecord[] = [];
-  if (orderId) try {
-    trades = await adapter.getTradeHistory(intent.original_account, { internalSymbol: intent.market,
-      startTime: attempt.timestamp, endTime: await store.databaseTime(scope), limit: 200, maxPages: 10 });
-  } catch { /* Retain unavailable economics without replaying the send. */ }
+  let historyReadFailed = false;
+  if (orderId && isVenueOrderId(orderId)) {
+    const endTime = await store.databaseTime(scope);
+    try {
+      trades = await adapter.getTradeHistory(intent.original_account, { internalSymbol: intent.market,
+        startTime: attempt.timestamp, endTime, limit: 200, maxPages: 10 });
+    } catch {
+      historyReadFailed = true;
+    }
+  }
   const observedAt = await store.databaseTime(scope);
   const after = intent.last_evidence.after as CloseSnapshot | undefined;
   const remaining = after?.positions.find(p => p.internalSymbol === intent.market)?.baseSize;
@@ -31,10 +38,13 @@ export async function readIntentFillEvidence(scope: CloseScope, adapter: Protoco
     orderId, openSide: intent.position_side, requestedSize: Number(intent.requested_size_base),
     sentAt: attempt?.timestamp ?? observedAt, observedAt, baseline: intent.position_epoch.strictBaseline ?? undefined,
     closeResult, trades });
+  if (historyReadFailed && accounting.reason === 'attributable_close_fills_unavailable') {
+    accounting.reason = 'history_read_failed';
+  }
   // The strict accounting validator rejects duplicates, invalid identities and overcoverage.
   let fill = accounting.size !== null && accounting.fee !== null && accounting.price !== null
     && Number(accounting.size) === Number(intent.requested_size_base)
-    ? summarizeSignalBotCloseFills({ trades: trades.filter(t => t.orderId === orderId), market: intent.market, openSide: intent.position_side,
+    ? summarizeSignalBotCloseFills({ trades: trades.filter(t => sameVenueOrderId(t.orderId, orderId)), market: intent.market, openSide: intent.position_side,
       expectedSize: Number(intent.requested_size_base), notBeforeMs: attempt.timestamp, requireExactSize: true }) : null;
   if (fill && intent.authority_ref.subscriberAccounting === true) {
     const net = intent.close_kind === 'partial' ? subscriberPartialExecution(accounting).pnl
@@ -50,7 +60,8 @@ export async function attributableIntentFill(adapter: ProtocolAdapter, intent: C
 
 /** Route and worker enter this writer with the scope lock and DB transaction held. */
 export async function accountDurableClose(client: any, intent: CloseIntent,
-  mode: 'confirmed' | 'flat' | 'still_open' | 'residual' | 'not_sent', fill?: IntentFill | null): Promise<void> {
+  mode: 'confirmed' | 'flat' | 'still_open' | 'residual' | 'not_sent', fill?: IntentFill | null,
+  unavailableReason = 'venue_fill_unattributed'): Promise<void> {
   const { storage, DatabaseStorage } = await import('../storage');
   const db = drizzle(client);
   const [trade] = await db.select().from(botTrades).where(eq(botTrades.id, intent.original_trade_id));
@@ -64,7 +75,7 @@ export async function accountDurableClose(client: any, intent: CloseIntent,
   const fillId = DatabaseStorage.canonicalCloseFillId({ signature: orderId ?? `close-intent-${intent.id}`,
     botId: intent.bot_id, side: 'CLOSE', market: intent.market, size: Number(intent.requested_size_base) });
   const closeAccounting = exact ? { kind: 'venue_exact', fillPrice: exact.fillPrice, pnl: exact.realizedPnl!, fee: exact.fee,
-    protocolFillId: fillId, observedAt: exact.fillTimestampMs } : { kind: 'unavailable', reason: 'venue_fill_unattributed',
+    protocolFillId: fillId, observedAt: exact.fillTimestampMs } : { kind: 'unavailable', reason: unavailableReason,
     observedAt: (intent.last_evidence.after as any)?.evidence.receivedAt ?? null, observationPrice: null };
   const [position] = partial ? await db.select().from(botPositions).where(and(eq(botPositions.tradingBotId, intent.bot_id), eq(botPositions.market, intent.market))) : [];
   const after = intent.last_evidence.after as import('../protocol/close-outcome').CloseSnapshot | undefined;
@@ -133,8 +144,11 @@ export async function notifyDurableClose(initial: CloseIntent, fill: IntentFill)
 export async function repairIntentAccounting(scope: CloseScope, intent: CloseIntent, adapter: ProtocolAdapter): Promise<void> {
   const { closeIntentStore: store } = await import('./close-intent-store');
   const { storage, DatabaseStorage } = await import('../storage');
-  const fill = intent.last_evidence.accountingPending === true
-    ? await attributableIntentFill(adapter, intent, scope) : intent.last_evidence.fill as IntentFill | null;
+  const evidence = intent.last_evidence.accountingPending === true ? await readIntentFillEvidence(scope, adapter, intent) : undefined;
+  if (evidence?.accounting.reason === 'history_read_failed') {
+    console.warn('[CloseIntent] history_read_failed', intent.id);
+  }
+  const fill = evidence ? evidence.fill : intent.last_evidence.fill as IntentFill | null;
   if (intent.last_evidence.accountingPending === true && fill && fill.realizedPnl !== null) {
     await store.transaction(scope, async client => { const result = await storage.remediateReconcilerCloseAccountingAtomic({ botId: intent.bot_id,
       tradeId: intent.original_trade_id, closeIntentId: intent.id, evidence: { kind: 'venue_exact', fillPrice: fill.fillPrice, pnl: fill.realizedPnl!, fee: fill.fee,
@@ -144,5 +158,5 @@ export async function repairIntentAccounting(scope: CloseScope, intent: CloseInt
       await persistCreatorShare(drizzle(client), intent, fill.realizedPnl! - fill.fee, result.trade.protocolFillId!);
     });
   }
-  await store.recordAccountingRepair(scope, intent, !fill || fill.realizedPnl === null, fill);
+  await store.recordAccountingRepair(scope, intent, !fill || fill.realizedPnl === null, fill, evidence?.accounting);
 }

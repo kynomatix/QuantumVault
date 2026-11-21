@@ -1,3 +1,4 @@
+import { isVenueOrderId, sameVenueOrderId } from './protocol/venue-order-id';
 import { signalKeyFailureTracker, signingKeyFailure, venueSigningKeyUsed } from './trading/signal-key-failures';
 import { executeSignalBotEntry, pauseSignalBotIfFlat } from './trading/signal-bot-entry-admission';
 import { CLOSE_IN_PROGRESS } from './trading/signal-bot-close-intent-types';
@@ -5175,7 +5176,7 @@ async function readSignalBotCloseFillConfirmation(input: {
   closeSentAtMs: number;
   expectedOrderId: string | undefined;
 }) {
-  if (!input.account || !input.expectedOrderId) return null;
+  if (!input.account || !input.expectedOrderId || !isVenueOrderId(input.expectedOrderId)) return null;
   try {
     const trades = await input.adapter.getTradeHistory(input.account, {
       internalSymbol: input.market,
@@ -5185,7 +5186,7 @@ async function readSignalBotCloseFillConfirmation(input: {
       maxPages: 10,
     });
     const result = summarizeSignalBotCloseFills({
-      trades: trades.filter(trade => trade.orderId === input.expectedOrderId),
+      trades: trades.filter(trade => sameVenueOrderId(trade.orderId, input.expectedOrderId)),
       market: input.market,
       openSide: input.openSide,
       expectedSize: input.expectedSize,

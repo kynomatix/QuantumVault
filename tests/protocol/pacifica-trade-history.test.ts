@@ -128,6 +128,14 @@ describe('Pacifica documented trade history authority', () => {
     });
   });
 
+  it.each(['0', '17', '9007199254740993', '01', ' 17 ', '17,17', '1.0', '1e0', '+1', '17\n'])(
+    'ACCT-01 rejects string history order ID %j as malformed', async orderId => {
+      const adapter = makeAdapter();
+      vi.spyOn(global, 'fetch').mockResolvedValue(envelope([trade({ order_id: orderId })], null, false));
+      await expect(adapter.getTradeHistory('account-1', { internalSymbol: 'ZEC-PERP' })).rejects.toThrow(/order_id malformed/);
+    },
+  );
+
   it('preserves semantic close direction independently from open direction', async () => {
     const adapter = makeAdapter();
     vi.spyOn(global, 'fetch').mockResolvedValue(envelope([
@@ -146,13 +154,17 @@ describe('Pacifica documented trade history authority', () => {
     ]);
   });
 
-  it.each([
+  const malformedPages: [string, unknown][] = [
+    ...[null, {}, [], '', -1, 0.5, Number.MAX_SAFE_INTEGER + 1].map((id): [string, unknown] =>
+      ['invalid order ID ' + JSON.stringify(id), { success: true, data: [trade({ order_id: id })], has_more: false }]),
     ['missing cursor', { success: true, data: [trade()], has_more: true }],
     ['non-array data', { success: true, data: {}, has_more: false }],
     ['unknown side', { success: true, data: [trade({ side: 'bid' })], has_more: false }],
     ['invalid amount', { success: true, data: [trade({ amount: '' })], has_more: false }],
     ['invalid timestamp', { success: true, data: [trade({ created_at: 'yesterday' })], has_more: false }],
-  ])('fails closed for %s', async (_label, body) => {
+  ];
+
+  it.each(malformedPages)('fails closed for %s', async (_label, body) => {
     const adapter = makeAdapter();
     vi.spyOn(global, 'fetch').mockResolvedValue(
       new Response(JSON.stringify(body), { status: 200 }),

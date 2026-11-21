@@ -304,7 +304,7 @@ function primeFlipRoute(options: {
   const size = Number((cachedPosition as { baseSize?: string }).baseSize);
   primeCloseSnapshots(size, post);
   routeMocks.adapter.getTradeHistory.mockImplementation(async () => [{
-    tradeId: 'EXAMPLE_FILL', orderId: 'flip-close-signature', internalSymbol: 'BTC-PERP',
+    tradeId: 'EXAMPLE_FILL', orderId: '17', internalSymbol: 'BTC-PERP',
     side: size > 0 ? 'short' : 'long', size: Math.abs(size), price: 65000, fee: 0, timestamp: Date.now(),
   }]);
   if (initial instanceof Error) routeMocks.adapter.getStrictPositionForMarket.mockRejectedValueOnce(initial);
@@ -314,7 +314,7 @@ function primeFlipRoute(options: {
 
   routeMocks.adapter.placeMarketOrder.mockReset().mockResolvedValue(options.closeResult ?? {
     success: true,
-    orderId: 'flip-close-signature',
+    orderId: '17',
     fillPrice: 65000,
     fee: 0,
   });
@@ -666,7 +666,7 @@ describe('close-path and restart contract wiring', () => {
 
         expect(response.status).toBe(400);
         expect(response.body.reversal).toMatchObject({
-          close: { kind: 'executed', signature: 'flip-close-signature' },
+          close: { kind: 'executed', signature: '17' },
           open: { kind: 'rejected', category: 'direction' },
         });
         expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledTimes(1);
@@ -739,11 +739,11 @@ describe('close-path and restart contract wiring', () => {
 
     it.each([
       ['tradingview', 'no signature', undefined, null, 'execution_rejected'],
-      ['tradingview', 'partial residual', 'flip-close-signature', { internalSymbol: 'BTC-PERP', baseSize: -0.1, entryPrice: 64000 }, 'post_close_unreadable'],
-      ['tradingview', 'post-close unreadable', 'flip-close-signature', new Error('post-close timeout'), 'post_close_unreadable'],
+      ['tradingview', 'partial residual', '17', { internalSymbol: 'BTC-PERP', baseSize: -0.1, entryPrice: 64000 }, 'post_close_unreadable'],
+      ['tradingview', 'post-close unreadable', '17', new Error('post-close timeout'), 'post_close_unreadable'],
       ['user', 'no signature', undefined, null, 'execution_rejected'],
-      ['user', 'partial residual', 'flip-close-signature', { internalSymbol: 'BTC-PERP', baseSize: -0.1, entryPrice: 64000 }, 'post_close_unreadable'],
-      ['user', 'post-close unreadable', 'flip-close-signature', new Error('post-close timeout'), 'post_close_unreadable'],
+      ['user', 'partial residual', '17', { internalSymbol: 'BTC-PERP', baseSize: -0.1, entryPrice: 64000 }, 'post_close_unreadable'],
+      ['user', 'post-close unreadable', '17', new Error('post-close timeout'), 'post_close_unreadable'],
     ] as const)(
       '%s keeps the opposite open forbidden after a %s close terminal and leaves the close pending for reconciliation',
       async (endpoint, _terminal, orderId, postCloseAuthority, expectedCloseKind) => {
@@ -915,14 +915,14 @@ describe('close-path and restart contract wiring', () => {
         routeMocks.adapter.placeMarketOrder.mockReset().mockResolvedValue({
           success: true,
           status: 'filled',
-          orderId: 'partial-order-one',
+          orderId: '17',
           fillPrice: 65000,
           fillSize: 0.125,
           fee: 0.1,
         });
 
         routeMocks.adapter.getTradeHistory.mockImplementation(async () => [{
-          tradeId: 'EXAMPLE_PARTIAL_FILL', orderId: 'partial-order-one', internalSymbol: 'BTC-PERP',
+          tradeId: 'EXAMPLE_PARTIAL_FILL', orderId: '17', internalSymbol: 'BTC-PERP',
           side: 'short', venueEventKind: 'close_long', size: 0.125, price: 65000, fee: 0.1,
           timestamp: Date.now(),
         }]);
@@ -934,7 +934,7 @@ describe('close-path and restart contract wiring', () => {
           status: 'success',
           type: 'partial_close',
           remainingSize: 0.125,
-          signature: 'partial-order-one',
+          signature: '17',
         });
         expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledTimes(1);
         expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
@@ -978,14 +978,14 @@ describe('close-path and restart contract wiring', () => {
         routeMocks.adapter.placeMarketOrder.mockReset().mockResolvedValue({
           success: true,
           status: 'filled',
-          orderId: 'partial-order-one',
+          orderId: '17',
           fillPrice: 65000,
           fillSize: 0.125,
           fee: 0.1,
         });
 
         routeMocks.adapter.getTradeHistory.mockImplementation(async () => [{
-          tradeId: 'EXAMPLE_PARTIAL_FILL', orderId: 'partial-order-one', internalSymbol: 'BTC-PERP',
+          tradeId: 'EXAMPLE_PARTIAL_FILL', orderId: '17', internalSymbol: 'BTC-PERP',
           side: 'short', venueEventKind: 'close_long', size: 0.125, price: 65000, fee: 0.1,
           timestamp: Date.now(),
         }]);
@@ -1037,14 +1037,14 @@ describe('close-path and restart contract wiring', () => {
         routeMocks.adapter.placeMarketOrder.mockReset().mockResolvedValue({
           success: true,
           status: 'filled',
-          orderId: 'partial-order-one',
+          orderId: '17',
           fillPrice: 65000,
           fillSize: 0.125,
           fee: 0.1,
         });
 
         routeMocks.adapter.getTradeHistory.mockImplementation(async () => [{
-          tradeId: 'EXAMPLE_PARTIAL_FILL', orderId: 'partial-order-one', internalSymbol: 'BTC-PERP',
+          tradeId: 'EXAMPLE_PARTIAL_FILL', orderId: '17', internalSymbol: 'BTC-PERP',
           side: 'short', venueEventKind: 'close_long', size: 0.125, price: 65000, fee: 0.1,
           timestamp: Date.now(),
         }]);

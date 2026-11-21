@@ -262,8 +262,10 @@ export class SignalBotCloseIntentStorage {
       Math.min(30_000 * 2 ** (attempts - 1), 1_800_000));
   }
 
-  async recordAccountingRepair(scope: CloseScope, current: CloseIntent, pending: boolean, fill?: import('./signal-bot-close-intent-accounting').IntentFill | null): Promise<void> {
-    const updated = await this.updateConfirmedEvidence(scope, current, { accountingPending: pending, fill: fill ?? null });
+  async recordAccountingRepair(scope: CloseScope, current: CloseIntent, pending: boolean, fill?: import('./signal-bot-close-intent-accounting').IntentFill | null,
+    accounting?: import('./subscriber-close-accounting').SubscriberCloseAccounting): Promise<void> {
+    const updated = await this.updateConfirmedEvidence(scope, current, { accountingPending: pending, fill: fill ?? null,
+      ...(accounting ? { subscriberAccounting: accounting } : {}) });
     if (pending) await this.recordRepairFailure(scope, updated);
   }
 

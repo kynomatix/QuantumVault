@@ -161,7 +161,7 @@ function snapshot(account: string, sequence: number, size: number): CloseSnapsho
       dispatchedAt: now, receivedAt: now, lastOrderId: sequence, complete: true, fresh: true, noDedup: true } };
 }
 function fill(overrides: Partial<TradeRecord> = {}): TradeRecord {
-  return { tradeId: 'EXAMPLE_FILL', orderId: 'EXAMPLE_ORDER', internalSymbol: 'BTC-PERP',
+  return { tradeId: 'EXAMPLE_FILL', orderId: '17', internalSymbol: 'BTC-PERP',
     side: 'short', price: 65000, size: 0.25, fee: 1, timestamp: Date.now(), ...overrides };
 }
 function prime(side: 'long' | 'short' = 'long', rows: () => TradeRecord[] = () => [fill()]) {
@@ -194,7 +194,7 @@ function prime(side: 'long' | 'short' = 'long', rows: () => TradeRecord[] = () =
   routeMocks.adapter.getStrictPositionForMarket.mockResolvedValue({ internalSymbol: 'BTC-PERP', baseSize: sign * 0.25, entryPrice: 64000 });
   routeMocks.adapter.getPositions.mockResolvedValue([{ internalSymbol: 'BTC-PERP', baseSize: sign * 0.25, entryPrice: 64000 }]);
   routeMocks.adapter.getTradeHistory.mockImplementation(async () => rows());
-  routeMocks.adapter.placeMarketOrder.mockResolvedValue({ success: true, status: 'filled', orderId: 'EXAMPLE_ORDER', landingDisposition: 'terminal' });
+  routeMocks.adapter.placeMarketOrder.mockResolvedValue({ success: true, status: 'filled', orderId: '17', landingDisposition: 'terminal' });
   let seq = 0;
   routeMocks.adapter.getCloseConfirmationSnapshot.mockImplementation(async (account: string) => snapshot(account, ++seq, !routeMocks.adapter.placeMarketOrder.mock.calls.length ? sign * 0.25 : 0));
 }
@@ -399,7 +399,7 @@ describe('round9 active parity and refused admission', () => {
       if (order.reduceOnly) {
         expect(storage.getPublishedBotByTradingBotId).toHaveBeenCalledOnce(); listing(false);
       }
-      return { success: true, status: 'filled', orderId: 'EXAMPLE_ORDER', landingDisposition: 'terminal' };
+      return { success: true, status: 'filled', orderId: '17', landingDisposition: 'terminal' };
     });
     try {
       await route({ ...flip, reduceOnlyIfRefused: { fraction: 0.5 } });

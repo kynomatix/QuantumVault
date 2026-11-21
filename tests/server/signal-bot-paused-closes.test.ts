@@ -180,7 +180,7 @@ function snapshot(account: string, sequence: number, size: number): CloseSnapsho
       dispatchedAt: now, receivedAt: now, lastOrderId: sequence, complete: true, fresh: true, noDedup: true } };
 }
 function fill(overrides: Partial<TradeRecord> = {}): TradeRecord {
-  return { tradeId: 'EXAMPLE_FILL', orderId: 'EXAMPLE_ORDER', internalSymbol: 'BTC-PERP',
+  return { tradeId: 'EXAMPLE_FILL', orderId: '17', internalSymbol: 'BTC-PERP',
     side: 'short', price: 65000, size: 0.25, fee: 1, timestamp: Date.now(), ...overrides };
 }
 function prime(side: 'long' | 'short' = 'long', rows: () => TradeRecord[] = () => [fill()]) {
@@ -220,7 +220,7 @@ function prime(side: 'long' | 'short' = 'long', rows: () => TradeRecord[] = () =
   routeMocks.adapter.getStrictPositionForMarket.mockResolvedValue({ internalSymbol: 'BTC-PERP', baseSize: sign * 0.25, entryPrice: 64000 });
   routeMocks.adapter.getPositions.mockResolvedValue([{ internalSymbol: 'BTC-PERP', baseSize: sign * 0.25, entryPrice: 64000 }]);
   routeMocks.adapter.getTradeHistory.mockImplementation(async () => rows());
-  routeMocks.adapter.placeMarketOrder.mockResolvedValue({ success: true, status: 'filled', orderId: 'EXAMPLE_ORDER', landingDisposition: 'terminal' });
+  routeMocks.adapter.placeMarketOrder.mockResolvedValue({ success: true, status: 'filled', orderId: '17', landingDisposition: 'terminal' });
   let seq = 0;
   routeMocks.adapter.getCloseConfirmationSnapshot.mockImplementation(async (account: string) => snapshot(account, ++seq, !routeMocks.adapter.placeMarketOrder.mock.calls.length ? sign * 0.25 : 0));
 }
@@ -311,7 +311,7 @@ function setup(options: { active?: boolean; subscriber?: boolean; subscriberSize
   routeMocks.adapter.getPositions.mockImplementation(async (account: string) => position(account) ? [{ internalSymbol: 'BTC-PERP', baseSize: position(account), entryPrice: 64000 }] : []);
   routeMocks.adapter.getCloseConfirmationSnapshot.mockImplementation(async (account: string) => snapshot(account, ++sequence, position(account)));
   routeMocks.adapter.placeMarketOrder.mockImplementation(async (order: any) => {
-    const orderId = `EXAMPLE_ORDER_${routeMocks.adapter.placeMarketOrder.mock.calls.length}`;
+    const orderId = String(17 + routeMocks.adapter.placeMarketOrder.mock.calls.length);
     orders.set(order.agentPublicKey, { orderId, size: order.sizeBase });
     return options.pending && order.agentPublicKey === source.protocolSubaccountId
       ? { success: false, landingDisposition: 'unconfirmed', error: 'EXAMPLE_PENDING' }

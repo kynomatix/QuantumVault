@@ -217,6 +217,22 @@ describe('Pacifica risk-increasing market-order ambiguity', () => {
     expect(result).toMatchObject({ success: false, status: 'unknown', landingDisposition: 'unconfirmed' });
   });
 
+  it.each([
+    [{ order_id: 17 }, 'acknowledged', 17],
+    [{ order_id: '17' }, 'acknowledged', '17'],
+    [{ order_id: 0 }, 'ambiguous', undefined],
+    [{ i: 17 }, 'ambiguous', undefined],
+    [{ order_id: { marker: 'EXAMPLE' } }, 'acknowledged', { marker: 'EXAMPLE' }],
+  ] as const)('ACCT-01 keeps the original durable acknowledgment for %j', async (data, kind, orderId) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ success: true, data }), { status: 200 })));
+    const outcome = await adapter().sendPreparedReduceOnlyMarketOrder({
+      account: 'EXAMPLE', environment: 'http://pacifica.test', market: 'BTC-PERP',
+      operationData: { symbol: 'BTC', amount: '0.01', side: 'ask', reduce_only: true, client_order_id: 'EXAMPLE' },
+    } as any, { timestamp: Date.now(), expiry_window: 5000 } as any, new Uint8Array(64));
+    expect(outcome.kind).toBe(kind);
+    expect('orderId' in outcome ? outcome.orderId : undefined).toEqual(orderId);
+  });
+
   it('maps a compact acknowledgement to success-shaped unconfirmed and preserves supplied identity', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       success: true,

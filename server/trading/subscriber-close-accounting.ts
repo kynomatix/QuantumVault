@@ -1,3 +1,4 @@
+import { canonicalVenueOrderId, isVenueOrderId } from '../protocol/venue-order-id';
 import DecimalJs from 'decimal.js';
 const Decimal = DecimalJs.clone({ precision: 48 });
 import type { ProtocolAdapter } from '../protocol/adapter';
@@ -9,7 +10,7 @@ export interface SubscriberCloseAccounting {
   version: 1;
   account: string;
   market: string;
-  orderId: string | null;
+  orderId: string | number | null;
   outcome: CloseResult['outcome'];
   size: string | null;
   price: string | null;
@@ -28,7 +29,7 @@ export interface SubscriberCloseAccounting {
 export interface SubscriberCloseEvidenceInput {
   account: string;
   market: string;
-  orderId?: string;
+  orderId?: string | number;
   openSide: 'long' | 'short';
   requestedSize: number;
   sentAt: number;
@@ -41,8 +42,9 @@ export interface SubscriberCloseEvidenceInput {
 /** The history reader is account-scoped; order, market, direction and time all
  * have to agree. Never consume adapter submit prices or unlabelled venue PnL. */
 export function subscriberCloseAccounting(input: SubscriberCloseEvidenceInput): SubscriberCloseAccounting {
+  const orderId = input.orderId ? canonicalVenueOrderId(input.orderId) : undefined;
   const result: SubscriberCloseAccounting = {
-    version: 1, account: input.account, market: input.market, orderId: input.orderId ?? null,
+    version: 1, account: input.account, market: input.market, orderId: orderId ?? input.orderId ?? null,
     outcome: input.closeResult?.outcome ?? 'unknown', size: null, price: null, fee: null,
     pnl: null, volume: null, entryPrice: null, fillIds: [], timestamp: null,
     reason: 'attributable_close_fills_unavailable', pnlConvention: 'net_of_close_fee',
@@ -51,11 +53,11 @@ export function subscriberCloseAccounting(input: SubscriberCloseEvidenceInput): 
       baseline: input.baseline, closeResult: input.closeResult },
   };
   const unavailable = (reason: string) => ({ ...result, reason });
-  if (!input.account || !input.orderId || !Number.isFinite(input.sentAt)
+  if (!input.account || !input.orderId || orderId === undefined || !Number.isFinite(input.sentAt)
     || !Number.isFinite(input.observedAt) || input.observedAt < input.sentAt
     || !Number.isFinite(input.requestedSize) || input.requestedSize <= 0
     || !['long', 'short'].includes(input.openSide)) return unavailable('invalid_close_identity');
-  const rows = input.trades.filter(row => row.orderId === input.orderId);
+  const rows = input.trades.filter(row => canonicalVenueOrderId(row.orderId) === orderId);
   if (!rows.length) return result;
   const closeSide = input.openSide === 'long' ? 'short' : 'long';
   const closeKind = input.openSide === 'long' ? 'close_long' : 'close_short';
@@ -112,14 +114,22 @@ export async function readSubscriberCloseAccounting(
   adapter: ProtocolAdapter, input: Omit<SubscriberCloseEvidenceInput, 'trades' | 'observedAt'>,
 ): Promise<SubscriberCloseAccounting> {
   let trades: TradeRecord[] = [];
-  if (adapter.protocolName === 'pacifica' && input.orderId) {
+  let historyReadFailed = false;
+  if (adapter.protocolName === 'pacifica' && input.orderId && isVenueOrderId(input.orderId)) {
+    const endTime = Date.now();
     try {
       trades = await adapter.getTradeHistory(input.account, {
-        internalSymbol: input.market, startTime: input.sentAt, endTime: Date.now(), limit: 200, maxPages: 10,
+        internalSymbol: input.market, startTime: input.sentAt, endTime, limit: 200, maxPages: 10,
       });
-    } catch { /* A submitted close is never retried because history is unavailable. */ }
+    } catch {
+      historyReadFailed = true;
+    }
   }
-  return subscriberCloseAccounting({ ...input, trades, observedAt: Date.now() });
+  const accounting = subscriberCloseAccounting({ ...input, trades, observedAt: Date.now() });
+  if (historyReadFailed && accounting.reason === 'attributable_close_fills_unavailable') {
+    accounting.reason = 'history_read_failed';
+  }
+  return accounting;
 }
 
 /** Shared persistence seam for full, FLIP and partial subscriber closes. Required
