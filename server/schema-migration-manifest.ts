@@ -2409,6 +2409,32 @@ END $migration$;`,
       `SELECT 1 /* verify retained market entry history; owner publishes DDL */`,
       `SELECT 1`,
       SIGNAL_CLOSE_INTENT_DDL,
+      // One-time requeue of 8 ZEC 2H FLUX MOMENTUM close intents that exhausted
+      // their accounting repairs before ACCT-01 (f6f4b146) fixed numeric order-ID
+      // matching. It only reopens the existing repair loop: notificationPending
+      // and effectsPending stay false, so no late Telegram message and no
+      // follower fan-out. Guards: confirmed, still exhausted, trade PnL still NULL,
+      // and untouched since before 2026-11-26, so it changes rows at most once.
+      // 3335bf10 (2026-11-21) is excluded: the reconciler already booked it.
+      // Its readiness check (207) is always true on purpose: the worker may
+      // legitimately exhaust again, and that must never take
+      // signal_bot_close_intent offline.
+      `UPDATE signal_bot_close_intents i
+          SET last_evidence = i.last_evidence || '{"accountingPending":true,"repairAttempts":0,"repairAttention":false}'::jsonb,
+              next_action_at = clock_timestamp(),
+              revision = i.revision + 1,
+              updated_at = clock_timestamp()
+         FROM bot_trades t
+        WHERE t.id = i.original_trade_id
+          AND i.id IN ('7fd5aa7e-6da5-452b-8eda-3be683512df2','ff946c96-b4be-4d58-96bc-d73f9979d362',
+                       'd7687e0d-f850-44df-a6e5-632507de66e5','b94a2645-4f50-4f9f-98b7-87273a9ad685',
+                       'a9886843-de4b-413d-99f2-eb28ce9596fc','c806a503-1b9a-43e5-ac80-60853b18df35',
+                       '57c55ba3-99bf-4a55-b11c-ff0cf678ed1a','60badc95-19ef-471b-8f5f-abfdede10e43')
+          AND i.status = 'confirmed'
+          AND i.last_evidence->>'repairAttention' = 'true'
+          AND i.last_evidence->>'accountingPending' = 'false'
+          AND i.updated_at < TIMESTAMPTZ '2026-11-26 00:00:00+00'
+          AND t.pnl IS NULL`,
 ] as const;
 
 const schemaMigrationMetadata = [
@@ -8025,7 +8051,8 @@ const schemaMigrationMetadata = [
   ],
   "operation": "ddl"
 },
-  { "id": "206-signal-bot-close-intent", "capabilities": ["signal_bot_close_intent"], "requirements": SIGNAL_CLOSE_INTENT_REQUIREMENTS, "operation": "ddl" }
+  { "id": "206-signal-bot-close-intent", "capabilities": ["signal_bot_close_intent"], "requirements": SIGNAL_CLOSE_INTENT_REQUIREMENTS, "operation": "ddl" },
+  { "id": "207-requeue-zec-exhausted-close-accounting", "capabilities": ["signal_bot_close_intent"], "requirements": [{ "kind": "data", "identity": "zec-close-requeue-20261126", "checkSql": "SELECT true AS ok" }], "operation": "backfill" }
 ] as const;
 
 export const SCHEMA_MIGRATION_MANIFEST: readonly SchemaMigrationDefinition[] =

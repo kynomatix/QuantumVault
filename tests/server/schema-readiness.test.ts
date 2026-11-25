@@ -187,11 +187,16 @@ describe("schema readiness", () => {
     expect(query.mock.calls.filter(([text]) => String(text).startsWith("CREATE"))).toHaveLength(3);
   });
 
-  it("retains the 203-entry SQL prefix and appends migrations 203 through 206 exactly once", () => {
+  it("retains the 203-entry SQL prefix and appends migrations 203 through 207 exactly once", () => {
     const { sqlEntries, metadata } = readDbSchemaMigrationManifest();
-    expect(sqlEntries).toHaveLength(207);
-    expect(metadata).toHaveLength(207);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(207);
+    expect(sqlEntries).toHaveLength(208);
+    expect(metadata).toHaveLength(208);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(208);
+    expect(metadata[207]).toMatchObject({ id: "207-requeue-zec-exhausted-close-accounting", capabilities: ["signal_bot_close_intent"], operation: "backfill" });
+    expect(metadata[207].requirements).toEqual([{ kind: "data", identity: "zec-close-requeue-20261126", checkSql: "SELECT true AS ok" }]);
+    expect(sqlEntries[207]).toMatch(/^UPDATE signal_bot_close_intents i/);
+    expect(sqlEntries[207]).toContain("i.updated_at < TIMESTAMPTZ '2026-11-26 00:00:00+00'");
+    expect(sqlEntries[207]).not.toMatch(/notificationPending|effectsPending/);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
     // SHA-256 of every SQL entry on the rebase baseline, including later migrations.
     const preservedSqlPrefixDigest = createHash("sha256").update(JSON.stringify(sqlEntries.slice(0, 203))).digest("hex").toUpperCase();
