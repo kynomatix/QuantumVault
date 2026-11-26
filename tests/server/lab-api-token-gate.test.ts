@@ -57,7 +57,7 @@ describe("Lab API token gate", () => {
     ["GET", "/API/LAB/STRATEGIES"],
     ["HEAD", "/api/lab/strategies"],
   ])("refuses a token on %s %s without looking it up", async (method, url) => {
-    const spy = vi.fn(lookup);
+    const spy = vi.fn(async (_hash: string) => ({ id: 7, walletAddress: "WalletA", scopes: ["lab:read", "lab:write"] }));
     const gate = createLabApiTokenGate(spy);
     const { res, next } = await call(gate, { method, url, auth: `Bearer ${TOKEN}` });
     expect(next).not.toHaveBeenCalled();
