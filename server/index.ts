@@ -310,7 +310,9 @@ const labProxy = createProxyMiddleware({
       proxyReq.removeHeader("x-lab-wallet");
 
       const req = _req as any;
-      const walletAddress = req.session?.walletAddress;
+      // A session wallet always wins; labTokenWallet is set only by labApiTokenGate,
+      // after a personal API token was verified for an allowlisted Lab route.
+      const walletAddress = req.session?.walletAddress || req.labTokenWallet;
       if (walletAddress) {
         proxyReq.setHeader("x-lab-wallet", walletAddress);
       }
@@ -334,7 +336,8 @@ const labProxy = createProxyMiddleware({
 });
 
 import { db } from "./db";
-import { labOptimizationRuns, labStrategies, labOptimizationConfigSchema } from "@shared/schema";
+import { labOptimizationRuns, labStrategies, labOptimizationConfigSchema, userApiTokens } from "@shared/schema";
+import { createLabApiTokenGate } from "./lab/api-token-gate";
 import { eq, sql } from "drizzle-orm";
 
 const labQueueBodyParser = express.json({ limit: "10mb" });
@@ -503,6 +506,16 @@ registerCreatorRoutes(app, sessionMiddleware as any, () => labSupervisor.labPort
 // GET-only, fail-closed when the token is unset, dedicated token ≠ ADMIN_PASSWORD.
 registerLogAccessRoutes(app);
 
+// Personal API tokens (Settings > API Access) for an allowlist of Lab routes; see
+// server/lab/api-token-gate.ts. The token is resolved here because the child process
+// only ever sees the shared lab secret.
+const labApiTokenGate = createLabApiTokenGate(async (tokenHash) => {
+  const [row] = await db.select({ id: userApiTokens.id, walletAddress: userApiTokens.walletAddress, scopes: userApiTokens.scopes })
+    .from(userApiTokens).where(eq(userApiTokens.tokenHash, tokenHash)).limit(1);
+  if (row) db.update(userApiTokens).set({ lastUsedAt: new Date() }).where(eq(userApiTokens.id, row.id)).catch(() => {});
+  return row;
+});
+
 app.use("/api/lab", (req: Request, res: Response, next: NextFunction) => {
   sessionMiddleware(req, res, (err) => {
     if (err) return next(err);
@@ -512,8 +525,10 @@ app.use("/api/lab", (req: Request, res: Response, next: NextFunction) => {
         message: "The lab process is starting up. Please try again shortly.",
       });
     }
-    req.url = req.originalUrl;
-    labProxy(req, res, next);
+    void labApiTokenGate(req, res, () => {
+      req.url = req.originalUrl;
+      labProxy(req, res, next);
+    });
   });
 });
 
