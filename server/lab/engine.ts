@@ -277,6 +277,9 @@ export function runBacktest(
     entryTimeIdx: number;
     entryAtr: number;
     remainingQty: number;
+    realizedPnl: number;
+    weightedExitPrice: number;
+    lastTarget: string;
     stopLoss: number;
     tp1Level: number;
     tp2Level: number;
@@ -304,37 +307,50 @@ export function runBacktest(
   } | null = null;
   let barsSinceExit = 999;
 
+  function creditExitFill(pos: Position, qty: number, fillPrice: number, pnlDollar: number) {
+    equity += pnlDollar;
+    pos.realizedPnl += pnlDollar;
+    // Quantities are fractions of the original position and sum to one at closure.
+    pos.weightedExitPrice += qty * fillPrice;
+    pos.remainingQty -= qty;
+  }
+
   function closePosition(pos: Position, exitBar: number, fillPrice: number, exitReason: string) {
     const dir = pos.direction;
-    const pnlPct = dir === "long"
-      ? ((fillPrice - pos.entryPrice) / pos.entryPrice) * 100
-      : ((pos.entryPrice - fillPrice) / pos.entryPrice) * 100;
-    const pnlDollar = pos.remainingQty * config.positionSize * (pnlPct / 100)
-      - 2 * pos.remainingQty * config.positionSize * config.commission
-      - slippageCost(pos.remainingQty, config.positionSize, config.slippage, exitReason);
-    equity += pnlDollar;
+    if (pos.remainingQty > 0) {
+      const pnlPct = dir === "long"
+        ? ((fillPrice - pos.entryPrice) / pos.entryPrice) * 100
+        : ((pos.entryPrice - fillPrice) / pos.entryPrice) * 100;
+      const pnlDollar = pos.remainingQty * config.positionSize * (pnlPct / 100)
+        - 2 * pos.remainingQty * config.positionSize * config.commission
+        - slippageCost(pos.remainingQty, config.positionSize, config.slippage, exitReason);
+      creditExitFill(pos, pos.remainingQty, fillPrice, pnlDollar);
+    }
+    const netPercent = config.positionSize ? 100 * pos.realizedPnl / config.positionSize : 0;
     trades.push({
       entryTime: new Date(candles[pos.entryTimeIdx].time).toISOString(),
       exitTime: new Date(candles[exitBar].time).toISOString(),
       direction: dir,
       entryPrice: pos.entryPrice,
-      exitPrice: fillPrice,
-      pnlPercent: Math.round(pnlPct * 100) / 100,
-      pnlDollar: Math.round(pnlDollar * 100) / 100,
+      exitPrice: pos.weightedExitPrice,
+      pnlPercent: Math.round(netPercent * 100) / 100,
+      pnlDollar: Math.round(pos.realizedPnl * 100) / 100,
       exitReason,
       barsHeld: exitBar - pos.entryBar,
     });
   }
 
-  function doPartialClose(pos: Position, qty: number, fillPrice: number) {
+  function doPartialClose(pos: Position, qty: number, fillPrice: number, target: string) {
+    if (qty === 0) return;
     const dir = pos.direction;
     const pnl = dir === "long"
       ? (fillPrice - pos.entryPrice) / pos.entryPrice
       : (pos.entryPrice - fillPrice) / pos.entryPrice;
-    equity += qty * config.positionSize * pnl
+    const pnlDollar = qty * config.positionSize * pnl
       - 2 * qty * config.positionSize * config.commission
       - slippageCost(qty, config.positionSize, config.slippage);
-    pos.remainingQty -= qty;
+    creditExitFill(pos, qty, fillPrice, pnlDollar);
+    pos.lastTarget = target;
   }
 
   for (let i = 0; i < n; i++) {
@@ -360,6 +376,9 @@ export function runBacktest(
         entryTimeIdx: i,
         entryAtr: pendingEntry.entryAtr,
         remainingQty: 1,
+        realizedPnl: 0,
+        weightedExitPrice: 0,
+        lastTarget: "",
         stopLoss: pendingEntry.stopLoss,
         tp1Level: pendingEntry.tp1Level,
         tp2Level: pendingEntry.tp2Level,
@@ -413,7 +432,7 @@ export function runBacktest(
           const fillPrice = isLong
             ? Math.max(open[i], position.tp1Level)
             : Math.min(open[i], position.tp1Level);
-          doPartialClose(position, Math.min(tp1QtyPct / 100, position.remainingQty), fillPrice);
+          doPartialClose(position, Math.min(tp1QtyPct / 100, position.remainingQty), fillPrice, "TP1");
           position.tp1Hit = true;
         }
       }
@@ -424,7 +443,7 @@ export function runBacktest(
           const fillPrice = isLong
             ? Math.max(open[i], position.tp2Level)
             : Math.min(open[i], position.tp2Level);
-          doPartialClose(position, Math.min(tp2QtyPct / 100, position.remainingQty), fillPrice);
+          doPartialClose(position, Math.min(tp2QtyPct / 100, position.remainingQty), fillPrice, "TP2");
           position.tp2Hit = true;
         }
       }
@@ -435,27 +454,14 @@ export function runBacktest(
           const fillPrice = isLong
             ? Math.max(open[i], position.tp3Level)
             : Math.min(open[i], position.tp3Level);
-          doPartialClose(position, Math.min(tp3QtyPct / 100, position.remainingQty), fillPrice);
+          doPartialClose(position, Math.min(tp3QtyPct / 100, position.remainingQty), fillPrice, "TP3");
           position.tp3Hit = true;
         }
       }
 
       if (position && position.remainingQty <= 0.001) {
-        const tpLabel = position.tp3Hit ? "TP3" : position.tp2Hit ? "TP2" : "TP1";
-        const avgExitPnlPct = position.direction === "long"
-          ? ((close[i] - position.entryPrice) / position.entryPrice) * 100
-          : ((position.entryPrice - close[i]) / position.entryPrice) * 100;
-        trades.push({
-          entryTime: new Date(candles[position.entryTimeIdx].time).toISOString(),
-          exitTime: new Date(candles[i].time).toISOString(),
-          direction: position.direction,
-          entryPrice: position.entryPrice,
-          exitPrice: close[i],
-          pnlPercent: Math.round(avgExitPnlPct * 100) / 100,
-          pnlDollar: 0,
-          exitReason: tpLabel,
-          barsHeld: i - position.entryBar,
-        });
+        // Settle any dust at this bar's close before retiring the position.
+        closePosition(position, i, close[i], position.lastTarget);
         position = null;
         exited = true;
         barsSinceExit = -1;
@@ -682,7 +688,7 @@ export function runBacktest(
   let grossProfit = 0;
   let grossLoss = 0;
   for (let t = 0; t < trades.length; t++) {
-    if (trades[t].pnlPercent > 0) {
+    if (trades[t].pnlDollar > 0) {
       winCount++;
       grossProfit += trades[t].pnlDollar;
     } else {
