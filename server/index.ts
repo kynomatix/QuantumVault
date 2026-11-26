@@ -525,10 +525,10 @@ app.use("/api/lab", (req: Request, res: Response, next: NextFunction) => {
         message: "The lab process is starting up. Please try again shortly.",
       });
     }
-    void labApiTokenGate(req, res, () => {
+    labApiTokenGate(req, res, () => {
       req.url = req.originalUrl;
       labProxy(req, res, next);
-    });
+    }).catch(next);
   });
 });
 

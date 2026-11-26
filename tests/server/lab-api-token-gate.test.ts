@@ -73,6 +73,13 @@ describe("Lab API token gate", () => {
     expect(write.next).not.toHaveBeenCalled();
   });
 
+  it.each([[null], ["lab:read,lab:write"], [{}]])("fails closed when stored scopes are %j", async (scopes) => {
+    const gate = createLabApiTokenGate(async () => ({ id: 3, walletAddress: "WalletC", scopes }));
+    const { res, next } = await call(gate, { url: "/api/lab/runs", auth: `Bearer ${TOKEN}` });
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(403);
+  });
+
   it("caps new runs per token per rolling 24 hours", async () => {
     let t = 1_000_000;
     const gate = createLabApiTokenGate(lookup, () => t);

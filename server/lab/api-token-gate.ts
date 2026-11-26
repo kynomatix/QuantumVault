@@ -7,7 +7,9 @@
 //   - only an allowlist of read and additive Lab routes accepts a token. Deletes, queue
 //     edits, cache clears, cancels and debug routes still need an interactive sign-in;
 //   - GET routes need the lab:read scope and POST routes need lab:write;
-//   - new optimisation runs are capped per token per rolling 24 hours.
+//   - run-optimization requests are capped per token per rolling 24 hours. The cap is
+//     best-effort: in memory, per process, reset on restart, and it counts accepted
+//     requests rather than runs that the Lab then starts.
 // The resolved wallet is handed to the proxy, which sends it as x-lab-wallet exactly as
 // it does for a session wallet.
 
@@ -40,7 +42,6 @@ export const LAB_TOKEN_ROUTES: readonly TokenRoute[] = Object.freeze([
 const RUN_PATH = /^\/api\/lab\/run-optimization$/;
 export const LAB_TOKEN_RUNS_PER_DAY = 24;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const DEFAULT_SCOPES: readonly LabTokenScope[] = ["lab:read", "lab:write"];
 
 export interface LabTokenRow {
   readonly id: number;
@@ -85,7 +86,9 @@ export function createLabApiTokenGate(lookup: LabTokenLookup, now: () => number 
       return;
     }
 
-    const scopes = Array.isArray(row.scopes) ? row.scopes : DEFAULT_SCOPES;
+    // Tokens are created with the column default ["lab:read","lab:write"]; anything
+    // that is not an array is treated as no scopes (fail closed).
+    const scopes = Array.isArray(row.scopes) ? row.scopes : [];
     if (!scopes.includes(route.scope)) {
       res.status(403).json({ error: `API token lacks the ${route.scope} scope` });
       return;

@@ -363,7 +363,8 @@ export function registerLabRoutes(app: Express): void {
       const strategyId = parseInt(req.params.id);
       if (isNaN(strategyId)) return res.status(400).json({ error: "Invalid strategy ID" });
       const strategy = await labStorage.getStrategy(strategyId);
-      if (strategy?.userId && strategy.userId !== (req as any).walletAddress) {
+      if (!strategy) return res.status(404).json({ error: "Strategy not found" });
+      if (strategy.userId && strategy.userId !== (req as any).walletAddress) {
         return res.status(403).json({ error: "Access denied" });
       }
       const limit = Math.min(50, parseInt(req.query.limit as string) || 10);
@@ -419,7 +420,8 @@ export function registerLabRoutes(app: Express): void {
       const strategyId = parseInt(req.params.id);
       if (isNaN(strategyId)) return res.status(400).json({ error: "Invalid strategy ID" });
       const strategy = await labStorage.getStrategy(strategyId);
-      if (strategy?.userId && strategy.userId !== (req as any).walletAddress) {
+      if (!strategy) return res.status(404).json({ error: "Strategy not found" });
+      if (strategy.userId && strategy.userId !== (req as any).walletAddress) {
         return res.status(403).json({ error: "Access denied" });
       }
       const { reportData, totalResults, totalRuns } = req.body;
@@ -437,7 +439,8 @@ export function registerLabRoutes(app: Express): void {
       const strategyId = parseInt(req.params.id);
       if (isNaN(strategyId)) return res.status(400).json({ error: "Invalid strategy ID" });
       const strategy = await labStorage.getStrategy(strategyId);
-      if (strategy?.userId && strategy.userId !== (req as any).walletAddress) {
+      if (!strategy) return res.status(404).json({ error: "Strategy not found" });
+      if (strategy.userId && strategy.userId !== (req as any).walletAddress) {
         return res.status(403).json({ error: "Access denied" });
       }
       const reports = await labStorage.getInsightsReports(strategyId);
@@ -1687,6 +1690,13 @@ export function registerLabRoutes(app: Express): void {
 
       if (config.strategyId) {
         const strategy = await labStorage.getStrategy(config.strategyId);
+        // A run may only name a strategy that exists and belongs to the caller
+        // (legacy shared strategies have no owner). Otherwise useInsights could copy
+        // another wallet's reports into this run's snapshot.
+        if (!strategy) return res.status(404).json({ error: "Strategy not found" });
+        if (strategy.userId && strategy.userId !== walletAddress) {
+          return res.status(403).json({ error: "Access denied" });
+        }
         if (strategy?.strategySettings && typeof strategy.strategySettings === "object") {
           processOrdersOnClose = (strategy.strategySettings as any).processOrdersOnClose;
           if ((strategy.strategySettings as any).nativeEngine) {
